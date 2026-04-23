@@ -1,0 +1,31 @@
+[package]
+name = "dev-design"
+version = "0.1.0"
+description = "Local React UI visual editor"
+authors = ["Dev Design"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "dev_design_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.0.0", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+regex = "1"
+rfd = "=0.14.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "2"
+tauri = { version = "=2.0.0", features = [] }
+tauri-codegen = "=2.0.0"
+tauri-macros = "=2.0.0"
+tauri-runtime = "=2.0.0"
+tauri-runtime-wry = "=2.0.0"
+tauri-utils = "=2.0.0"
+uuid = { version = "=1.10.0", features = ["v4", "serde"] }
+walkdir = "2"
