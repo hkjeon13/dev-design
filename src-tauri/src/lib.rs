@@ -19,6 +19,8 @@ const APP_DIR_NAME: &str = "dev-design";
 const MAX_TEXT_FILE_BYTES: u64 = 2_000_000;
 const SNAPSHOT_META_DIR: &str = ".dev-design";
 const BASELINE_MANIFEST_FILE: &str = "baseline-manifest.json";
+const SNAPSHOT_DETAILS_FILE: &str = "snapshot.json";
+const RECENT_SNAPSHOT_FILE: &str = "recent-snapshot.json";
 
 #[derive(Default)]
 struct AppState {
@@ -159,8 +161,12 @@ fn open_project(
         .map_err(|_| "Snapshot state lock failed.".to_string())?
         .insert(id, snapshot.clone());
 
-    let source_files = list_source_files(&snapshot_root, &snapshot_app_root)?;
     let mut warnings = Vec::new();
+    if let Err(error) = save_recent_snapshot(&snapshot) {
+        warnings.push(format!("Could not remember the recent snapshot: {}", error));
+    }
+
+    let source_files = list_source_files(&snapshot_root, &snapshot_app_root)?;
     if !source_files
         .iter()
         .any(|file| file.path.ends_with(".tsx") || file.path.ends_with(".jsx"))
@@ -173,6 +179,52 @@ fn open_project(
         source_files,
         warnings,
     })
+}
+
+#[tauri::command]
+fn load_recent_snapshot(
+    state: tauri::State<AppState>,
+) -> Result<Option<OpenProjectResponse>, String> {
+    let Some(snapshot) = read_recent_snapshot()? else {
+        return Ok(None);
+    };
+    let snapshot_root = PathBuf::from(&snapshot.snapshot_path);
+    let snapshot_app_root = PathBuf::from(&snapshot.app_root_path);
+    if !snapshot_root.is_dir() || !snapshot_app_root.is_dir() {
+        return Ok(None);
+    }
+
+    state
+        .snapshots
+        .lock()
+        .map_err(|_| "Snapshot state lock failed.".to_string())?
+        .insert(snapshot.id.clone(), snapshot.clone());
+
+    let mut warnings = Vec::new();
+    if !Path::new(&snapshot.original_path).is_dir() {
+        warnings.push(
+            "The original project path no longer exists. Snapshot editing is available, but sync will fail until the project is reopened.".to_string(),
+        );
+    }
+    if !manifest_path(&snapshot_root).exists() {
+        warnings.push(
+            "Baseline manifest is missing. Reopen the project before syncing changes.".to_string(),
+        );
+    }
+
+    let source_files = list_source_files(&snapshot_root, &snapshot_app_root)?;
+    if !source_files
+        .iter()
+        .any(|file| file.path.ends_with(".tsx") || file.path.ends_with(".jsx"))
+    {
+        warnings.push("No TSX/JSX files were detected in the snapshot.".to_string());
+    }
+
+    Ok(Some(OpenProjectResponse {
+        snapshot,
+        source_files,
+        warnings,
+    }))
 }
 
 #[tauri::command]
@@ -481,6 +533,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pick_project_directory,
             open_project,
+            load_recent_snapshot,
             list_snapshot_files,
             read_snapshot_file,
             write_snapshot_file,
@@ -813,6 +866,42 @@ fn manifest_path(snapshot_root: &Path) -> PathBuf {
     snapshot_root
         .join(SNAPSHOT_META_DIR)
         .join(BASELINE_MANIFEST_FILE)
+}
+
+fn snapshot_details_path(snapshot_root: &Path) -> PathBuf {
+    snapshot_root
+        .join(SNAPSHOT_META_DIR)
+        .join(SNAPSHOT_DETAILS_FILE)
+}
+
+fn recent_snapshot_path() -> Result<PathBuf, String> {
+    Ok(app_data_root()?.join(RECENT_SNAPSHOT_FILE))
+}
+
+fn save_recent_snapshot(snapshot: &ProjectSnapshot) -> Result<(), String> {
+    write_json_file(&recent_snapshot_path()?, snapshot)?;
+    write_json_file(
+        &snapshot_details_path(Path::new(&snapshot.snapshot_path)),
+        snapshot,
+    )
+}
+
+fn read_recent_snapshot() -> Result<Option<ProjectSnapshot>, String> {
+    let path = recent_snapshot_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(path).map_err(to_string)?;
+    let snapshot: ProjectSnapshot = serde_json::from_str(&content).map_err(to_string)?;
+    Ok(Some(snapshot))
+}
+
+fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(to_string)?;
+    }
+    let content = serde_json::to_string_pretty(value).map_err(to_string)?;
+    fs::write(path, content.as_bytes()).map_err(to_string)
 }
 
 fn create_baseline_manifest(original_root: &Path, snapshot_root: &Path) -> Result<(), String> {

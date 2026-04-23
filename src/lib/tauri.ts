@@ -15,6 +15,10 @@ export function openProject(originalPath: string): Promise<OpenProjectResponse> 
   return invoke<OpenProjectResponse>("open_project", { originalPath });
 }
 
+export function loadRecentSnapshot(): Promise<OpenProjectResponse | null> {
+  return invoke<OpenProjectResponse | null>("load_recent_snapshot");
+}
+
 export function listSnapshotFiles(snapshotId: string): Promise<SourceFile[]> {
   return invoke<SourceFile[]>("list_snapshot_files", { snapshotId });
 }

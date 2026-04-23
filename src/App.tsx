@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { analyzeSourceFiles } from "./lib/analyzer";
 import { applyCssRuleUpdate } from "./lib/cssTransforms";
 import {
@@ -11,6 +11,7 @@ import {
   applySync,
   createSyncPlan,
   installDependencies,
+  loadRecentSnapshot,
   openProject,
   pickProjectDirectory,
   recordBaseline,
@@ -64,6 +65,14 @@ interface LoadingState {
   progress: number;
 }
 
+type PanelContextTarget = "project" | "inspector";
+
+interface PanelContextMenuState {
+  target: PanelContextTarget;
+  x: number;
+  y: number;
+}
+
 export default function App() {
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [sourceFiles, setSourceFiles] = useState<SourceFile[]>([]);
@@ -80,9 +89,11 @@ export default function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("preview");
   const [isProjectSidebarCollapsed, setProjectSidebarCollapsed] = useState(false);
   const [isInspectorCollapsed, setInspectorCollapsed] = useState(false);
+  const [panelMenu, setPanelMenu] = useState<PanelContextMenuState | null>(null);
   const [syncPlan, setSyncPlan] = useState<SyncPlan | null>(null);
   const [selectedSyncFiles, setSelectedSyncFiles] = useState<Set<string>>(new Set());
   const [editLog, setEditLog] = useState<EditOperation[]>([]);
+  const didRestoreRecent = useRef(false);
 
   const nodeMap = useMemo(() => new Map((analysis?.nodes ?? []).map((node) => [node.id, node])), [analysis]);
   const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) ?? null : null;
@@ -104,6 +115,52 @@ export default function App() {
   }, [selectedFile?.path, selectedFile?.content]);
 
   useEffect(() => {
+    if (didRestoreRecent.current) {
+      return;
+    }
+    didRestoreRecent.current = true;
+
+    async function restoreRecentSnapshot() {
+      setBusy(true);
+      setLoading({
+        detail: "Checking for the most recent workspace.",
+        progress: 18,
+      });
+      try {
+        const response = await loadRecentSnapshot();
+        if (!response) {
+          return;
+        }
+        setLoading({
+          detail: "Restoring the recent internal snapshot.",
+          progress: 58,
+        });
+        await waitForPaint();
+        setSnapshot(response.snapshot);
+        await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
+        setSelectedNodeId(null);
+        setPreview(null);
+        setSyncPlan(null);
+        setLoading({
+          detail: "Rebuilding the project tree and source mappings.",
+          progress: 88,
+        });
+        setStatus({
+          tone: response.warnings.length > 0 ? "warning" : "success",
+          text: response.warnings[0] ?? `Restored recent snapshot: ${response.snapshot.originalPath}`,
+        });
+      } catch (error) {
+        setStatus({ tone: "warning", text: `Could not restore recent snapshot: ${String(error)}` });
+      } finally {
+        setLoading(null);
+        setBusy(false);
+      }
+    }
+
+    restoreRecentSnapshot();
+  }, []);
+
+  useEffect(() => {
     function handlePreviewMessage(event: MessageEvent) {
       if (event.data?.type !== "dev-design-select" || typeof event.data.id !== "string") {
         return;
@@ -115,6 +172,42 @@ export default function App() {
     window.addEventListener("message", handlePreviewMessage);
     return () => window.removeEventListener("message", handlePreviewMessage);
   }, [nodeMap]);
+
+  useEffect(() => {
+    function closePanelMenu() {
+      setPanelMenu(null);
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        closePanelMenu();
+      }
+    }
+    window.addEventListener("click", closePanelMenu);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("click", closePanelMenu);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  function openPanelMenu(event: ReactMouseEvent<HTMLElement>, target: PanelContextTarget) {
+    event.preventDefault();
+    event.stopPropagation();
+    setPanelMenu({
+      target,
+      x: Math.min(event.clientX, window.innerWidth - 190),
+      y: Math.min(event.clientY, window.innerHeight - 76),
+    });
+  }
+
+  function togglePanelFromMenu(target: PanelContextTarget) {
+    if (target === "project") {
+      setProjectSidebarCollapsed((current) => !current);
+    } else {
+      setInspectorCollapsed((current) => !current);
+    }
+    setPanelMenu(null);
+  }
 
   async function handleOpenProject() {
     setBusy(true);
@@ -448,19 +541,14 @@ export default function App() {
           isInspectorCollapsed ? "inspector-collapsed" : ""
         }`}
       >
-        <aside className={`sidebar ${isProjectSidebarCollapsed ? "collapsed" : ""}`}>
+        <aside
+          className={`sidebar ${isProjectSidebarCollapsed ? "collapsed" : ""}`}
+          onContextMenu={(event) => openPanelMenu(event, "project")}
+        >
           <div className="panel-header">
             <h2>{isProjectSidebarCollapsed ? "P" : "Project"}</h2>
             <div className="sidebar-header-actions">
               {!isProjectSidebarCollapsed && <span>{analysis?.nodes.length ?? 0}</span>}
-              <button
-                className="collapse-button"
-                onClick={() => setProjectSidebarCollapsed((current) => !current)}
-                title={isProjectSidebarCollapsed ? "Expand Project" : "Collapse Project"}
-                aria-label={isProjectSidebarCollapsed ? "Expand Project" : "Collapse Project"}
-              >
-                <CollapseIcon collapsed={isProjectSidebarCollapsed} />
-              </button>
             </div>
           </div>
           {!isProjectSidebarCollapsed && (
@@ -529,19 +617,14 @@ export default function App() {
           </div>
         </section>
 
-        <aside className={`inspector ${isInspectorCollapsed ? "collapsed" : ""}`}>
+        <aside
+          className={`inspector ${isInspectorCollapsed ? "collapsed" : ""}`}
+          onContextMenu={(event) => openPanelMenu(event, "inspector")}
+        >
           <div className="panel-header">
             <h2>{isInspectorCollapsed ? "I" : "Inspector"}</h2>
             <div className="sidebar-header-actions">
               {!isInspectorCollapsed && <span>{selectedNode?.type ?? "none"}</span>}
-              <button
-                className="collapse-button"
-                onClick={() => setInspectorCollapsed((current) => !current)}
-                title={isInspectorCollapsed ? "Expand Inspector" : "Collapse Inspector"}
-                aria-label={isInspectorCollapsed ? "Expand Inspector" : "Collapse Inspector"}
-              >
-                <CollapseIcon collapsed={!isInspectorCollapsed} />
-              </button>
             </div>
           </div>
           {!isInspectorCollapsed && (
@@ -625,6 +708,16 @@ export default function App() {
           )}
         </aside>
       </section>
+
+      {panelMenu && (
+        <PanelContextMenu
+          menu={panelMenu}
+          isCollapsed={
+            panelMenu.target === "project" ? isProjectSidebarCollapsed : isInspectorCollapsed
+          }
+          onSelect={() => togglePanelFromMenu(panelMenu.target)}
+        />
+      )}
 
       {syncPlan && (
         <SyncReview
@@ -742,21 +835,28 @@ function SyncIcon() {
   );
 }
 
-function CollapseIcon({ collapsed }: { collapsed: boolean }) {
+function PanelContextMenu({
+  menu,
+  isCollapsed,
+  onSelect,
+}: {
+  menu: PanelContextMenuState;
+  isCollapsed: boolean;
+  onSelect: () => void;
+}) {
+  const panelName = menu.target === "project" ? "Project" : "Inspector";
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      {collapsed ? (
-        <>
-          <path d="m9 6 6 6-6 6" />
-          <path d="M5 4v16" />
-        </>
-      ) : (
-        <>
-          <path d="m15 6-6 6 6 6" />
-          <path d="M19 4v16" />
-        </>
-      )}
-    </svg>
+    <div
+      className="panel-context-menu"
+      style={{ left: menu.x, top: menu.y }}
+      role="menu"
+      onClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <button role="menuitem" onClick={onSelect}>
+        {isCollapsed ? `Expand ${panelName}` : `Collapse ${panelName}`}
+      </button>
+    </div>
   );
 }
 

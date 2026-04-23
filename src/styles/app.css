@@ -279,6 +279,7 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  cursor: context-menu;
 }
 
 .sidebar.collapsed .panel-header,
@@ -312,28 +313,7 @@ button:disabled {
 
 .sidebar.collapsed .sidebar-header-actions,
 .inspector.collapsed .sidebar-header-actions {
-  display: grid;
-  justify-items: center;
-  gap: 6px;
-}
-
-.collapse-button {
-  width: 32px;
-  height: 32px;
-  min-height: 32px;
-  padding: 0;
-  display: grid;
-  place-items: center;
-}
-
-.collapse-button svg {
-  width: 17px;
-  height: 17px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  display: none;
 }
 
 .snapshot-meta {
@@ -391,6 +371,34 @@ button:disabled {
 
 .node-dot.jsx_element {
   background: #c47f2c;
+}
+
+.panel-context-menu {
+  position: fixed;
+  z-index: 30;
+  width: 170px;
+  padding: 4px;
+  border: 1px solid #cfd9e2;
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgb(31 41 51 / 0.16);
+}
+
+.panel-context-menu button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.panel-context-menu button:hover:not(:disabled) {
+  border: 0;
+  background: #eef3f7;
 }
 
 .stage {
