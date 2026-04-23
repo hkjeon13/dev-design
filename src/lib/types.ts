@@ -10,6 +10,8 @@ export interface ProjectSnapshot {
   id: string;
   originalPath: string;
   snapshotPath: string;
+  appRootPath: string;
+  appRootRelativePath: string;
   packageManager: string;
   frameworkGuess: string;
   devCommand: string;
@@ -60,6 +62,10 @@ export interface ChangedFile {
   path: string;
   status: string;
   diff: string;
+  originalChangedSinceOpen: boolean;
+  snapshotChangedSinceOpen: boolean;
+  canApply: boolean;
+  warning?: string | null;
 }
 
 export interface SyncPlan {

@@ -50,3 +50,11 @@ export function createSyncPlan(snapshotId: string): Promise<SyncPlan> {
 export function applySync(snapshotId: string, files: string[]): Promise<ApplySyncResponse> {
   return invoke<ApplySyncResponse>("apply_sync", { snapshotId, files });
 }
+
+export function refreshFromOriginal(snapshotId: string, files: string[]): Promise<SourceFile[]> {
+  return invoke<SourceFile[]>("refresh_from_original", { snapshotId, files });
+}
+
+export function recordBaseline(snapshotId: string): Promise<void> {
+  return invoke<void>("record_baseline", { snapshotId });
+}

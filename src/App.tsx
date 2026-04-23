@@ -13,6 +13,8 @@ import {
   installDependencies,
   openProject,
   pickProjectDirectory,
+  recordBaseline,
+  refreshFromOriginal,
   startPreview,
   stopPreview,
   writeSnapshotFile,
@@ -50,10 +52,16 @@ const STYLE_PROPERTIES = [
 ];
 
 type StatusTone = "neutral" | "success" | "warning" | "error";
+type ViewMode = "preview" | "code";
 
 interface StatusMessage {
   tone: StatusTone;
   text: string;
+}
+
+interface LoadingState {
+  detail: string;
+  progress: number;
 }
 
 export default function App() {
@@ -64,10 +72,14 @@ export default function App() {
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<StatusMessage | null>(null);
+  const [loading, setLoading] = useState<LoadingState | null>(null);
   const [styleMode, setStyleMode] = useState<StyleMode>("tailwind");
   const [styleProperty, setStyleProperty] = useState("width");
   const [styleValue, setStyleValue] = useState("320px");
   const [codeDraft, setCodeDraft] = useState("");
+  const [viewMode, setViewMode] = useState<ViewMode>("preview");
+  const [isProjectSidebarCollapsed, setProjectSidebarCollapsed] = useState(false);
+  const [isInspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [syncPlan, setSyncPlan] = useState<SyncPlan | null>(null);
   const [selectedSyncFiles, setSelectedSyncFiles] = useState<Set<string>>(new Set());
   const [editLog, setEditLog] = useState<EditOperation[]>([]);
@@ -83,6 +95,9 @@ export default function App() {
   useEffect(() => {
     if (selectedFile) {
       setCodeDraft(selectedFile.content);
+      if (selectedFile.kind !== "react") {
+        setViewMode("code");
+      }
     } else {
       setCodeDraft("");
     }
@@ -102,16 +117,38 @@ export default function App() {
   }, [nodeMap]);
 
   async function handleOpenProject() {
+    setBusy(true);
+    setLoading({
+      detail: "Selecting project directory.",
+      progress: 8,
+    });
+    await waitForPaint();
     const path = await pickProjectDirectory();
     if (!path) {
+      setLoading(null);
+      setBusy(false);
       return;
     }
-    setBusy(true);
     setStatus({ tone: "neutral", text: "Opening project snapshot..." });
+    setLoading({
+      detail: "Creating an internal snapshot from the selected directory.",
+      progress: 18,
+    });
+    await waitForPaint();
     try {
       const response = await openProject(path);
+      setLoading({
+        detail: "Analyzing React files, routes, and style assets.",
+        progress: 62,
+      });
+      await waitForPaint();
       setSnapshot(response.snapshot);
       await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
+      await recordBaseline(response.snapshot.id);
+      setLoading({
+        detail: "Building the project tree and source mappings.",
+        progress: 88,
+      });
       setSelectedNodeId(null);
       setPreview(null);
       setSyncPlan(null);
@@ -122,6 +159,7 @@ export default function App() {
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
+      setLoading(null);
       setBusy(false);
     }
   }
@@ -274,7 +312,7 @@ export default function App() {
     try {
       const plan = await createSyncPlan(snapshot.id);
       setSyncPlan(plan);
-      setSelectedSyncFiles(new Set(plan.changedFiles.map((file) => file.path)));
+      setSelectedSyncFiles(new Set(plan.changedFiles.filter((file) => file.canApply).map((file) => file.path)));
       setStatus({
         tone: plan.changedFiles.length > 0 ? "warning" : "neutral",
         text: `${plan.changedFiles.length} changed file(s) ready for review.`,
@@ -295,6 +333,11 @@ export default function App() {
       setStatus({ tone: "warning", text: "Select at least one file to sync." });
       return;
     }
+    const unsafe = syncPlan.changedFiles.filter((file) => selectedSyncFiles.has(file.path) && !file.canApply);
+    if (unsafe.length > 0) {
+      setStatus({ tone: "warning", text: "Selected files include original changes or conflicts. Refresh the sync plan first." });
+      return;
+    }
     setBusy(true);
     try {
       const response = await applySync(snapshot.id, files);
@@ -303,6 +346,25 @@ export default function App() {
         text: `Applied ${response.appliedFiles.length} file(s). Backup: ${response.backupRoot}`,
       });
       setSyncPlan(null);
+    } catch (error) {
+      setStatus({ tone: "error", text: String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRefreshFromOriginal(files: string[]) {
+    if (!snapshot || files.length === 0) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const refreshedFiles = await refreshFromOriginal(snapshot.id, files);
+      await reanalyzeAndPersist(snapshot.id, refreshedFiles);
+      const plan = await createSyncPlan(snapshot.id);
+      setSyncPlan(plan);
+      setSelectedSyncFiles(new Set(plan.changedFiles.filter((file) => file.canApply).map((file) => file.path)));
+      setStatus({ tone: "success", text: `Refreshed ${files.length} file(s) from the original project.` });
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
@@ -333,7 +395,7 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">DD</span>
-          <div>
+          <div className="brand-copy">
             <h1>Dev Design</h1>
             <p>{snapshot ? `${snapshot.frameworkGuess} snapshot` : "Local React UI editor"}</p>
           </div>
@@ -346,167 +408,220 @@ export default function App() {
             Install
           </button>
           {preview ? (
-            <button onClick={handleStopPreview} disabled={!snapshot || busy}>
-              Stop Preview
+            <button
+              className="icon-button"
+              onClick={handleStopPreview}
+              disabled={!snapshot || busy}
+              title="Stop Preview"
+              aria-label="Stop Preview"
+            >
+              <StopIcon />
             </button>
           ) : (
-            <button onClick={handleStartPreview} disabled={!snapshot || busy}>
-              Start Preview
+            <button
+              className="icon-button"
+              onClick={handleStartPreview}
+              disabled={!snapshot || busy}
+              title="Start Preview"
+              aria-label="Start Preview"
+            >
+              <PlayIcon />
             </button>
           )}
-          <button className="primary" onClick={handleCreateSyncPlan} disabled={!snapshot || busy}>
-            Sync
+          <button
+            className="icon-button primary"
+            onClick={handleCreateSyncPlan}
+            disabled={!snapshot || busy}
+            title="Sync"
+            aria-label="Sync"
+          >
+            <SyncIcon />
           </button>
         </div>
       </header>
 
+      {loading && <TopProgress loading={loading} />}
       {status && <div className={`status ${status.tone}`}>{status.text}</div>}
 
-      <section className="workspace">
-        <aside className="sidebar">
+      <section
+        className={`workspace ${isProjectSidebarCollapsed ? "sidebar-collapsed" : ""} ${
+          isInspectorCollapsed ? "inspector-collapsed" : ""
+        }`}
+      >
+        <aside className={`sidebar ${isProjectSidebarCollapsed ? "collapsed" : ""}`}>
           <div className="panel-header">
-            <h2>Project</h2>
-            <span>{analysis?.nodes.length ?? 0}</span>
-          </div>
-          <div className="snapshot-meta">
-            {snapshot ? (
-              <>
-                <strong>{snapshot.packageManager}</strong>
-                <span>{snapshot.originalPath}</span>
-              </>
-            ) : (
-              <span>Select a React project directory to create an internal snapshot.</span>
-            )}
-          </div>
-          <div className="tree">
-            {rootNodes.map((node) => (
-              <TreeNode
-                key={node.id}
-                node={node}
-                nodeMap={nodeMap}
-                selectedNodeId={selectedNodeId}
-                onSelect={setSelectedNodeId}
-              />
-            ))}
-          </div>
-        </aside>
-
-        <section className="stage">
-          <div className="preview-panel">
-            <div className="panel-header">
-              <h2>Preview</h2>
-              <span>{preview?.url ?? "not running"}</span>
-            </div>
-            {preview ? (
-              <iframe title="Project preview" src={preview.url} />
-            ) : (
-              <div className="empty-state">
-                <h2>Preview is stopped</h2>
-                <p>Install dependencies if needed, then start the internal snapshot preview.</p>
-              </div>
-            )}
-          </div>
-
-          <div className="code-panel">
-            <div className="panel-header">
-              <h2>Code</h2>
-              <span>{selectedFile?.path ?? "no selection"}</span>
-            </div>
-            <textarea
-              value={codeDraft}
-              onChange={(event) => setCodeDraft(event.target.value)}
-              disabled={!selectedFile}
-              spellCheck={false}
-            />
-            <div className="code-actions">
-              <button onClick={handleSaveCode} disabled={!selectedFile || busy}>
-                Save Snapshot Code
+            <h2>{isProjectSidebarCollapsed ? "P" : "Project"}</h2>
+            <div className="sidebar-header-actions">
+              {!isProjectSidebarCollapsed && <span>{analysis?.nodes.length ?? 0}</span>}
+              <button
+                className="collapse-button"
+                onClick={() => setProjectSidebarCollapsed((current) => !current)}
+                title={isProjectSidebarCollapsed ? "Expand Project" : "Collapse Project"}
+                aria-label={isProjectSidebarCollapsed ? "Expand Project" : "Collapse Project"}
+              >
+                <CollapseIcon collapsed={isProjectSidebarCollapsed} />
               </button>
             </div>
           </div>
-        </section>
-
-        <aside className="inspector">
-          <div className="panel-header">
-            <h2>Inspector</h2>
-            <span>{selectedNode?.type ?? "none"}</span>
-          </div>
-          {selectedNode ? (
+          {!isProjectSidebarCollapsed && (
             <>
-              <div className="selected-card">
-                <strong>{selectedNode.displayName}</strong>
-                <span>{selectedNode.sourceFile}</span>
-                <small>
-                  {selectedNode.sourceRange.start}-{selectedNode.sourceRange.end}
-                </small>
+              <div className="snapshot-meta">
+                {snapshot ? (
+                  <>
+                    <strong>{snapshot.packageManager}</strong>
+                    <span>
+                      {snapshot.originalPath}
+                      {snapshot.appRootRelativePath ? `/${snapshot.appRootRelativePath}` : ""}
+                    </span>
+                  </>
+                ) : (
+                  <span>Select a React project directory to create an internal snapshot.</span>
+                )}
               </div>
-
-              <div className="control-group">
-                <h3>Style</h3>
-                <div className="segmented">
-                  {(["tailwind", "inline", "css"] as StyleMode[]).map((mode) => (
-                    <button
-                      key={mode}
-                      className={styleMode === mode ? "active" : ""}
-                      onClick={() => setStyleMode(mode)}
-                    >
-                      {mode}
-                    </button>
-                  ))}
-                </div>
-                <label>
-                  Property
-                  <select value={styleProperty} onChange={(event) => setStyleProperty(event.target.value)}>
-                    {STYLE_PROPERTIES.map((property) => (
-                      <option key={property} value={property}>
-                        {property}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Value
-                  <input value={styleValue} onChange={(event) => setStyleValue(event.target.value)} />
-                </label>
-                <button onClick={handleApplyStyle} disabled={busy || selectedNode.type !== "jsx_element"}>
-                  Apply Style
-                </button>
-              </div>
-
-              <div className="control-group">
-                <h3>Structure</h3>
-                <div className="structure-grid">
-                  {(["move_up", "move_down", "duplicate", "delete", "wrap", "unwrap", "insert_child"] as StructureOperation[]).map(
-                    (operation) => (
-                      <button
-                        key={operation}
-                        onClick={() => handleStructureOperation(operation)}
-                        disabled={busy || selectedNode.type !== "jsx_element"}
-                      >
-                        {operation.replace("_", " ")}
-                      </button>
-                    ),
-                  )}
-                </div>
-              </div>
-
-              <div className="control-group">
-                <h3>Edit Log</h3>
-                <div className="edit-log">
-                  {editLog.slice(0, 8).map((edit) => (
-                    <div key={`${edit.timestamp}-${edit.targetNodeId}`}>
-                      <strong>{edit.operationType}</strong>
-                      <span>{edit.resultingFiles.join(", ")}</span>
-                    </div>
-                  ))}
-                </div>
+              <div className="tree">
+                {rootNodes.map((node) => (
+                  <TreeNode
+                    key={node.id}
+                    node={node}
+                    nodeMap={nodeMap}
+                    selectedNodeId={selectedNodeId}
+                    onSelect={setSelectedNodeId}
+                  />
+                ))}
               </div>
             </>
-          ) : (
-            <div className="empty-state compact">
-              <h2>No node selected</h2>
-              <p>Choose an item in the tree or click an instrumented preview element.</p>
+          )}
+        </aside>
+
+        <section className="stage">
+          <div className="work-panel">
+            <div className="panel-header">
+              <div className="view-title">
+                <h2>{viewMode === "preview" ? "Preview" : "Code"}</h2>
+                <span>{viewMode === "preview" ? preview?.url ?? "not running" : selectedFile?.path ?? "no selection"}</span>
+              </div>
+              <ViewToggle mode={viewMode} onChange={setViewMode} />
             </div>
+            {viewMode === "preview" ? (
+              preview ? (
+                <iframe title="Project preview" src={preview.url} />
+              ) : (
+                <div className="empty-state">
+                  <h2>Preview is stopped</h2>
+                  <p>Install dependencies if needed, then start the internal snapshot preview.</p>
+                </div>
+              )
+            ) : (
+              <div className="code-panel">
+                <textarea
+                  value={codeDraft}
+                  onChange={(event) => setCodeDraft(event.target.value)}
+                  disabled={!selectedFile}
+                  spellCheck={false}
+                />
+                <div className="code-actions">
+                  <button onClick={handleSaveCode} disabled={!selectedFile || busy}>
+                    Save Snapshot Code
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <aside className={`inspector ${isInspectorCollapsed ? "collapsed" : ""}`}>
+          <div className="panel-header">
+            <h2>{isInspectorCollapsed ? "I" : "Inspector"}</h2>
+            <div className="sidebar-header-actions">
+              {!isInspectorCollapsed && <span>{selectedNode?.type ?? "none"}</span>}
+              <button
+                className="collapse-button"
+                onClick={() => setInspectorCollapsed((current) => !current)}
+                title={isInspectorCollapsed ? "Expand Inspector" : "Collapse Inspector"}
+                aria-label={isInspectorCollapsed ? "Expand Inspector" : "Collapse Inspector"}
+              >
+                <CollapseIcon collapsed={!isInspectorCollapsed} />
+              </button>
+            </div>
+          </div>
+          {!isInspectorCollapsed && (
+            selectedNode ? (
+              <>
+                <div className="selected-card">
+                  <strong>{selectedNode.displayName}</strong>
+                  <span>{selectedNode.sourceFile}</span>
+                  <small>
+                    {selectedNode.sourceRange.start}-{selectedNode.sourceRange.end}
+                  </small>
+                </div>
+
+                <div className="control-group">
+                  <h3>Style</h3>
+                  <div className="segmented">
+                    {(["tailwind", "inline", "css"] as StyleMode[]).map((mode) => (
+                      <button
+                        key={mode}
+                        className={styleMode === mode ? "active" : ""}
+                        onClick={() => setStyleMode(mode)}
+                      >
+                        {mode}
+                      </button>
+                    ))}
+                  </div>
+                  <label>
+                    Property
+                    <select value={styleProperty} onChange={(event) => setStyleProperty(event.target.value)}>
+                      {STYLE_PROPERTIES.map((property) => (
+                        <option key={property} value={property}>
+                          {property}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Value
+                    <input value={styleValue} onChange={(event) => setStyleValue(event.target.value)} />
+                  </label>
+                  <button onClick={handleApplyStyle} disabled={busy || selectedNode.type !== "jsx_element"}>
+                    Apply Style
+                  </button>
+                </div>
+
+                <div className="control-group">
+                  <h3>Structure</h3>
+                  <div className="structure-grid">
+                    {(["move_up", "move_down", "duplicate", "delete", "wrap", "unwrap", "insert_child"] as StructureOperation[]).map(
+                      (operation) => (
+                        <button
+                          key={operation}
+                          onClick={() => handleStructureOperation(operation)}
+                          disabled={busy || selectedNode.type !== "jsx_element"}
+                        >
+                          {operation.replace("_", " ")}
+                        </button>
+                      ),
+                    )}
+                  </div>
+                </div>
+
+                <div className="control-group">
+                  <h3>Edit Log</h3>
+                  <div className="edit-log">
+                    {editLog.slice(0, 8).map((edit) => (
+                      <div key={`${edit.timestamp}-${edit.targetNodeId}`}>
+                        <strong>{edit.operationType}</strong>
+                        <span>{edit.resultingFiles.join(", ")}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="empty-state compact">
+                <h2>No node selected</h2>
+                <p>Choose an item in the tree or click an instrumented preview element.</p>
+              </div>
+            )
           )}
         </aside>
       </section>
@@ -528,10 +643,120 @@ export default function App() {
           }}
           onClose={() => setSyncPlan(null)}
           onApply={handleApplySync}
+          onRefresh={handleRefreshFromOriginal}
           busy={busy}
         />
       )}
     </main>
+  );
+}
+
+function TopProgress({ loading }: { loading: LoadingState }) {
+  return (
+    <div className="top-progress" role="status" aria-live="polite">
+      <div className="top-progress-meta">
+        <span>{loading.detail}</span>
+        <span>{loading.progress}%</span>
+      </div>
+      <div className="progress-track" aria-label={`${loading.progress}% complete`}>
+        <div className="progress-fill" style={{ width: `${loading.progress}%` }} />
+        <div className="progress-shine" />
+      </div>
+    </div>
+  );
+}
+
+function waitForPaint() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+}
+
+function ViewToggle({ mode, onChange }: { mode: ViewMode; onChange: (mode: ViewMode) => void }) {
+  return (
+    <div className="view-toggle" role="tablist" aria-label="Preview or code view">
+      <button
+        className={mode === "preview" ? "active" : ""}
+        onClick={() => onChange("preview")}
+        aria-label="Preview view"
+        title="Preview"
+      >
+        <EyeIcon />
+      </button>
+      <button
+        className={mode === "code" ? "active" : ""}
+        onClick={() => onChange("code")}
+        aria-label="Code view"
+        title="Code"
+      >
+        <CodeIcon />
+      </button>
+    </div>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M2.4 12s3.5-6 9.6-6 9.6 6 9.6 6-3.5 6-9.6 6-9.6-6-9.6-6Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function CodeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m9 7-5 5 5 5" />
+      <path d="m15 7 5 5-5 5" />
+    </svg>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 5v14l11-7-11-7Z" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+    </svg>
+  );
+}
+
+function SyncIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M20 7h-5.5a6.5 6.5 0 0 0-10.2 2" />
+      <path d="M20 7l-3-3" />
+      <path d="M20 7l-3 3" />
+      <path d="M4 17h5.5a6.5 6.5 0 0 0 10.2-2" />
+      <path d="M4 17l3 3" />
+      <path d="M4 17l3-3" />
+    </svg>
+  );
+}
+
+function CollapseIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      {collapsed ? (
+        <>
+          <path d="m9 6 6 6-6 6" />
+          <path d="M5 4v16" />
+        </>
+      ) : (
+        <>
+          <path d="m15 6-6 6 6 6" />
+          <path d="M19 4v16" />
+        </>
+      )}
+    </svg>
   );
 }
 
@@ -576,6 +801,7 @@ function SyncReview({
   onToggle,
   onClose,
   onApply,
+  onRefresh,
   busy,
 }: {
   plan: SyncPlan;
@@ -583,9 +809,23 @@ function SyncReview({
   onToggle: (path: string) => void;
   onClose: () => void;
   onApply: () => void;
+  onRefresh: (files: string[]) => void;
   busy: boolean;
 }) {
   const [activeFile, setActiveFile] = useState<ChangedFile | null>(plan.changedFiles[0] ?? null);
+  useEffect(() => {
+    if (!activeFile || !plan.changedFiles.some((file) => file.path === activeFile.path)) {
+      setActiveFile(plan.changedFiles[0] ?? null);
+    }
+  }, [activeFile, plan.changedFiles]);
+  const selectedChangedFiles = plan.changedFiles.filter((file) => selectedFiles.has(file.path));
+  const hasUnsafeSelection = selectedChangedFiles.some((file) => !file.canApply);
+  const refreshableFiles = selectedChangedFiles
+    .filter((file) => file.originalChangedSinceOpen && !file.snapshotChangedSinceOpen)
+    .map((file) => file.path);
+  const hasConflicts = plan.changedFiles.some(
+    (file) => file.originalChangedSinceOpen && file.snapshotChangedSinceOpen,
+  );
   return (
     <div className="modal-backdrop">
       <section className="sync-modal">
@@ -597,6 +837,7 @@ function SyncReview({
           {plan.warnings.map((warning) => (
             <p key={warning}>{warning}</p>
           ))}
+          {hasConflicts && <p>Conflict files are blocked from direct apply because both sides changed.</p>}
         </div>
         <div className="sync-content">
           <div className="sync-files">
@@ -605,26 +846,49 @@ function SyncReview({
                 <input
                   type="checkbox"
                   checked={selectedFiles.has(file.path)}
+                  disabled={busy || (!file.canApply && file.snapshotChangedSinceOpen)}
                   onChange={() => onToggle(file.path)}
                 />
                 <button type="button" onClick={() => setActiveFile(file)}>
                   <strong>{file.path}</strong>
-                  <span>{file.status}</span>
+                  <span className="file-badges">
+                    <FileBadge file={file} />
+                    <span>{file.status}</span>
+                  </span>
                 </button>
               </label>
             ))}
           </div>
-          <pre className="diff-view">{activeFile?.diff ?? "No changes."}</pre>
+          <div className="diff-panel">
+            {activeFile?.warning && <div className="conflict-note">{activeFile.warning}</div>}
+            <pre className="diff-view">{activeFile?.diff ?? "No changes."}</pre>
+          </div>
         </div>
         <div className="modal-actions">
+          <button onClick={() => onRefresh(refreshableFiles)} disabled={busy || refreshableFiles.length === 0}>
+            Refresh From Original
+          </button>
           <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={onApply} disabled={busy || selectedFiles.size === 0}>
+          <button className="primary" onClick={onApply} disabled={busy || selectedFiles.size === 0 || hasUnsafeSelection}>
             Apply Selected
           </button>
         </div>
       </section>
     </div>
   );
+}
+
+function FileBadge({ file }: { file: ChangedFile }) {
+  if (file.originalChangedSinceOpen && file.snapshotChangedSinceOpen) {
+    return <span className="badge conflict">Conflict</span>;
+  }
+  if (file.originalChangedSinceOpen) {
+    return <span className="badge original">Original</span>;
+  }
+  if (file.snapshotChangedSinceOpen) {
+    return <span className="badge snapshot">Snapshot</span>;
+  }
+  return <span className="badge">Changed</span>;
 }
 
 function replaceFile(files: SourceFile[], path: string, content: string): SourceFile[] {

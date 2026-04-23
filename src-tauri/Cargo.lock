@@ -746,6 +746,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
  "tauri",
  "tauri-build",
