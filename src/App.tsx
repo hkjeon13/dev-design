@@ -45,15 +45,30 @@ const STYLE_PROPERTIES = [
   "color",
   "background-color",
   "border",
+  "border-style",
+  "border-color",
+  "border-width",
   "border-radius",
+  "box-shadow",
   "display",
   "align-items",
   "justify-content",
+  "opacity",
+  "transform",
   "visibility",
+];
+
+const COLOR_PRESETS = ["#ef4444", "#f97316", "#facc15", "#22c55e", "#14b8a6", "#3b82f6", "#8b5cf6", "#111827", "#ffffff"];
+const OPACITY_PRESETS = ["25%", "55%", "75%", "100%"];
+const SHADOW_PRESETS = [
+  { label: "None", value: "none" },
+  { label: "Drop shadow", value: "0 12px 30px rgba(15, 23, 42, 0.18)" },
+  { label: "Soft", value: "0 8px 18px rgba(15, 23, 42, 0.12)" },
 ];
 
 type StatusTone = "neutral" | "success" | "warning" | "error";
 type ViewMode = "preview" | "code";
+type BaselineStatus = "idle" | "recording" | "ready" | "error";
 
 interface StatusMessage {
   tone: StatusTone;
@@ -79,6 +94,7 @@ export default function App() {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
+  const [previewStarting, setPreviewStarting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<StatusMessage | null>(null);
   const [loading, setLoading] = useState<LoadingState | null>(null);
@@ -87,13 +103,34 @@ export default function App() {
   const [styleValue, setStyleValue] = useState("320px");
   const [codeDraft, setCodeDraft] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("preview");
+  const [selectionToolActive, setSelectionToolActive] = useState(false);
+  const [openColorPalette, setOpenColorPalette] = useState<"color" | "background-color" | "stroke" | null>(null);
+  const [selectedTextColor, setSelectedTextColor] = useState("#111827");
+  const [selectedBackgroundColor, setSelectedBackgroundColor] = useState("#ffffff");
+  const [toolX, setToolX] = useState("0");
+  const [toolY, setToolY] = useState("0");
+  const [toolRotation, setToolRotation] = useState("0");
+  const [toolWidth, setToolWidth] = useState("292");
+  const [toolHeight, setToolHeight] = useState("292");
+  const [toolPadding, setToolPadding] = useState("0");
+  const [toolGap, setToolGap] = useState("0");
+  const [toolFontSize, setToolFontSize] = useState("16");
+  const [toolFontWeight, setToolFontWeight] = useState("400");
+  const [toolOpacity, setToolOpacity] = useState("100");
+  const [toolRadius, setToolRadius] = useState("0");
+  const [strokeColor, setStrokeColor] = useState("#dcdcdc");
+  const [strokeWeight, setStrokeWeight] = useState("1");
+  const [shadowValue, setShadowValue] = useState(SHADOW_PRESETS[1].value);
   const [isProjectSidebarCollapsed, setProjectSidebarCollapsed] = useState(false);
   const [isInspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [panelMenu, setPanelMenu] = useState<PanelContextMenuState | null>(null);
+  const [baselineStatus, setBaselineStatus] = useState<BaselineStatus>("idle");
   const [syncPlan, setSyncPlan] = useState<SyncPlan | null>(null);
   const [selectedSyncFiles, setSelectedSyncFiles] = useState<Set<string>>(new Set());
   const [editLog, setEditLog] = useState<EditOperation[]>([]);
   const didRestoreRecent = useRef(false);
+  const baselineTaskId = useRef(0);
+  const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
 
   const nodeMap = useMemo(() => new Map((analysis?.nodes ?? []).map((node) => [node.id, node])), [analysis]);
   const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) ?? null : null;
@@ -102,6 +139,12 @@ export default function App() {
     () => (analysis?.nodes ?? []).filter((node) => node.parentId === null),
     [analysis],
   );
+  const baselineUnavailable = snapshot !== null && baselineStatus !== "ready";
+  const baselineRecording = baselineStatus === "recording";
+  const snapshotEditingDisabled = busy || baselineUnavailable;
+  const selectedNodeCanEdit = selectedNode?.type === "jsx_element";
+  const previewControlActive = preview !== null || previewStarting;
+  const previewLabel = preview?.url ?? (previewStarting ? "starting" : "not running");
 
   useEffect(() => {
     if (selectedFile) {
@@ -138,8 +181,16 @@ export default function App() {
         await waitForPaint();
         setSnapshot(response.snapshot);
         await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
+        baselineTaskId.current += 1;
+        setBaselineStatus(
+          response.warnings.some((warning) => warning.includes("Baseline manifest is missing"))
+            ? "error"
+            : "ready",
+        );
         setSelectedNodeId(null);
         setPreview(null);
+        setPreviewStarting(false);
+        setSelectionToolActive(false);
         setSyncPlan(null);
         setLoading({
           detail: "Rebuilding the project tree and source mappings.",
@@ -165,27 +216,36 @@ export default function App() {
       if (event.data?.type !== "dev-design-select" || typeof event.data.id !== "string") {
         return;
       }
-      if (nodeMap.has(event.data.id)) {
+      if (selectionToolActive && nodeMap.has(event.data.id)) {
         setSelectedNodeId(event.data.id);
       }
     }
     window.addEventListener("message", handlePreviewMessage);
     return () => window.removeEventListener("message", handlePreviewMessage);
-  }, [nodeMap]);
+  }, [nodeMap, selectionToolActive]);
+
+  useEffect(() => {
+    sendSelectionModeToPreview();
+  }, [selectionToolActive, preview?.url]);
 
   useEffect(() => {
     function closePanelMenu() {
       setPanelMenu(null);
+    }
+    function handlePointerDown(event: PointerEvent) {
+      if (event.button === 0) {
+        closePanelMenu();
+      }
     }
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         closePanelMenu();
       }
     }
-    window.addEventListener("click", closePanelMenu);
+    window.addEventListener("pointerdown", handlePointerDown);
     window.addEventListener("keydown", handleKeyDown);
     return () => {
-      window.removeEventListener("click", closePanelMenu);
+      window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, []);
@@ -207,6 +267,49 @@ export default function App() {
       setInspectorCollapsed((current) => !current);
     }
     setPanelMenu(null);
+  }
+
+  function toggleSelectionTool() {
+    setSelectionToolActive((current) => {
+      const next = !current;
+      setStatus({
+        tone: "neutral",
+        text: next
+          ? "Selection tool enabled. Click an instrumented preview element to edit it."
+          : "Selection tool disabled.",
+      });
+      return next;
+    });
+  }
+
+  function sendSelectionModeToPreview() {
+    previewFrameRef.current?.contentWindow?.postMessage(
+      {
+        type: "dev-design-selection-mode",
+        enabled: selectionToolActive,
+      },
+      "*",
+    );
+  }
+
+  function recordBaselineInBackground(snapshotId: string) {
+    const taskId = baselineTaskId.current + 1;
+    baselineTaskId.current = taskId;
+    setBaselineStatus("recording");
+    void recordBaseline(snapshotId)
+      .then(() => {
+        if (baselineTaskId.current !== taskId) {
+          return;
+        }
+        setBaselineStatus("ready");
+      })
+      .catch((error) => {
+        if (baselineTaskId.current !== taskId) {
+          return;
+        }
+        setBaselineStatus("error");
+        setStatus({ tone: "warning", text: `Baseline hashing failed: ${String(error)}` });
+      });
   }
 
   async function handleOpenProject() {
@@ -237,13 +340,15 @@ export default function App() {
       await waitForPaint();
       setSnapshot(response.snapshot);
       await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
-      await recordBaseline(response.snapshot.id);
+      recordBaselineInBackground(response.snapshot.id);
       setLoading({
         detail: "Building the project tree and source mappings.",
         progress: 88,
       });
       setSelectedNodeId(null);
       setPreview(null);
+      setPreviewStarting(false);
+      setSelectionToolActive(false);
       setSyncPlan(null);
       setStatus({
         tone: response.warnings.length > 0 ? "warning" : "success",
@@ -293,12 +398,15 @@ export default function App() {
       return;
     }
     setBusy(true);
-    setStatus({ tone: "neutral", text: "Starting preview server..." });
+    setPreviewStarting(true);
+    setStatus({ tone: "neutral", text: "Preparing snapshot dependencies and starting preview..." });
     try {
       const nextPreview = await startPreview(snapshot.id);
       setPreview(nextPreview);
+      setPreviewStarting(false);
       setStatus({ tone: "success", text: `Preview running on ${nextPreview.url}` });
     } catch (error) {
+      setPreviewStarting(false);
       setStatus({ tone: "error", text: String(error) });
     } finally {
       setBusy(false);
@@ -309,25 +417,126 @@ export default function App() {
     if (!snapshot) {
       return;
     }
+    setPreviewStarting(false);
     await stopPreview(snapshot.id);
     setPreview(null);
     setStatus({ tone: "neutral", text: "Preview stopped." });
   }
 
   async function handleApplyStyle() {
+    await applyStyleUpdates([{ property: styleProperty, value: styleValue }]);
+  }
+
+  async function handleQuickStyle(property: string, value: string) {
+    setStyleProperty(property);
+    setStyleValue(value);
+    await applyStyleUpdates([{ property, value }], "inline");
+  }
+
+  async function handleAlignment(justifyContent?: string, alignItems?: string) {
+    const updates: StyleUpdate[] = [{ property: "display", value: "flex" }];
+    if (justifyContent) {
+      updates.push({ property: "justify-content", value: justifyContent });
+    }
+    if (alignItems) {
+      updates.push({ property: "align-items", value: alignItems });
+    }
+    await applyStyleUpdates(updates, "inline");
+  }
+
+  async function handleTransformChange(x = toolX, y = toolY, rotation = toolRotation) {
+    setToolX(x);
+    setToolY(y);
+    setToolRotation(rotation);
+    await handleQuickStyle("transform", `translate(${toCssPx(x)}, ${toCssPx(y)}) rotate(${rotation || "0"}deg)`);
+  }
+
+  async function handleDimensionsChange(width = toolWidth, height = toolHeight) {
+    setToolWidth(width);
+    setToolHeight(height);
+    await applyStyleUpdates(
+      [
+        { property: "width", value: toCssPx(width) },
+        { property: "height", value: toCssPx(height) },
+      ],
+      "inline",
+    );
+  }
+
+  async function handleLayoutSpacingChange(padding = toolPadding, gap = toolGap) {
+    setToolPadding(padding);
+    setToolGap(gap);
+    await applyStyleUpdates(
+      [
+        { property: "padding", value: toCssPx(padding) },
+        { property: "gap", value: toCssPx(gap) },
+      ],
+      "inline",
+    );
+  }
+
+  async function handleTypographyChange(fontSize = toolFontSize, fontWeight = toolFontWeight) {
+    setToolFontSize(fontSize);
+    setToolFontWeight(fontWeight);
+    await applyStyleUpdates(
+      [
+        { property: "font-size", value: toCssPx(fontSize) },
+        { property: "font-weight", value: fontWeight },
+      ],
+      "inline",
+    );
+  }
+
+  async function handleOpacityChange(value: string) {
+    setToolOpacity(value.replace("%", ""));
+    await handleQuickStyle("opacity", String(parseFloat(value) / 100));
+  }
+
+  async function handleRadiusChange(value: string) {
+    setToolRadius(value.replace("px", ""));
+    await handleQuickStyle("border-radius", toCssPx(value));
+  }
+
+  async function handleStrokeChange(color = strokeColor, weight = strokeWeight) {
+    setStrokeColor(color);
+    setStrokeWeight(weight);
+    await applyStyleUpdates(
+      [
+        { property: "border-style", value: "solid" },
+        { property: "border-color", value: color },
+        { property: "border-width", value: toCssPx(weight) },
+      ],
+      "inline",
+    );
+  }
+
+  async function handleColorStyle(property: "color" | "background-color", value: string) {
+    if (property === "color") {
+      setSelectedTextColor(value);
+    } else {
+      setSelectedBackgroundColor(value);
+    }
+    setOpenColorPalette(null);
+    await handleQuickStyle(property, value);
+  }
+
+  async function applyStyleUpdates(updates: StyleUpdate[], mode: StyleMode = styleMode) {
+    if (baselineUnavailable) {
+      setStatus({ tone: "warning", text: "Snapshot baseline is still being prepared. Try again shortly." });
+      return;
+    }
     if (!snapshot || !selectedNode || !selectedFile || selectedNode.type !== "jsx_element") {
       return;
     }
-    const update: StyleUpdate = { property: styleProperty, value: styleValue };
     setBusy(true);
     try {
-      if (styleMode === "css") {
+      if (mode === "css") {
         const className = getClassTarget(selectedFile.content, selectedNode.id);
         if (!className) {
           setStatus({ tone: "warning", text: "No static class target was found for CSS editing." });
           return;
         }
-        const result = applyCssRuleUpdate(sourceFiles, className, [update]);
+        const result = applyCssRuleUpdate(sourceFiles, className, updates);
         if (result.warning) {
           setStatus({ tone: "warning", text: result.warning });
           return;
@@ -336,20 +545,20 @@ export default function App() {
         if (changed) {
           await writeSnapshotFile(snapshot.id, changed.path, changed.content);
           await reanalyzeAndPersist(snapshot.id, result.files);
-          appendEdit("style_update", selectedNode.id, { mode: styleMode, update }, [changed.path]);
+          appendEdit("style_update", selectedNode.id, { mode, updates }, [changed.path]);
           setStatus({ tone: "success", text: `Updated ${changed.path}` });
         }
         return;
       }
 
       const nextContent =
-        styleMode === "tailwind"
-          ? applyTailwindUpdate(selectedFile.content, selectedNode.id, [update])
-          : applyInlineStyleUpdate(selectedFile.content, selectedNode.id, [update]);
+        mode === "tailwind"
+          ? applyTailwindUpdate(selectedFile.content, selectedNode.id, updates)
+          : applyInlineStyleUpdate(selectedFile.content, selectedNode.id, updates);
       const nextFiles = replaceFile(sourceFiles, selectedFile.path, nextContent);
       await writeSnapshotFile(snapshot.id, selectedFile.path, nextContent);
       await reanalyzeAndPersist(snapshot.id, nextFiles);
-      appendEdit("style_update", selectedNode.id, { mode: styleMode, update }, [selectedFile.path]);
+      appendEdit("style_update", selectedNode.id, { mode, updates }, [selectedFile.path]);
       setStatus({ tone: "success", text: `Updated ${selectedFile.path}` });
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
@@ -359,6 +568,10 @@ export default function App() {
   }
 
   async function handleStructureOperation(operation: StructureOperation) {
+    if (baselineUnavailable) {
+      setStatus({ tone: "warning", text: "Snapshot baseline is still being prepared. Try again shortly." });
+      return;
+    }
     if (!snapshot || !selectedNode || !selectedFile || selectedNode.type !== "jsx_element") {
       return;
     }
@@ -380,6 +593,10 @@ export default function App() {
   }
 
   async function handleSaveCode() {
+    if (baselineUnavailable) {
+      setStatus({ tone: "warning", text: "Snapshot baseline is still being prepared. Try again shortly." });
+      return;
+    }
     if (!snapshot || !selectedFile) {
       return;
     }
@@ -398,6 +615,10 @@ export default function App() {
   }
 
   async function handleCreateSyncPlan() {
+    if (baselineUnavailable) {
+      setStatus({ tone: "warning", text: "Snapshot baseline is still being prepared. Try again shortly." });
+      return;
+    }
     if (!snapshot) {
       return;
     }
@@ -500,13 +721,13 @@ export default function App() {
           <button onClick={handleInstallDependencies} disabled={!snapshot || busy}>
             Install
           </button>
-          {preview ? (
+          {previewControlActive ? (
             <button
               className="icon-button"
               onClick={handleStopPreview}
               disabled={!snapshot || busy}
-              title="Stop Preview"
-              aria-label="Stop Preview"
+              title={previewStarting ? "Starting Preview" : "Stop Preview"}
+              aria-label={previewStarting ? "Starting Preview" : "Stop Preview"}
             >
               <StopIcon />
             </button>
@@ -524,7 +745,7 @@ export default function App() {
           <button
             className="icon-button primary"
             onClick={handleCreateSyncPlan}
-            disabled={!snapshot || busy}
+            disabled={!snapshot || busy || baselineUnavailable}
             title="Sync"
             aria-label="Sync"
           >
@@ -586,17 +807,26 @@ export default function App() {
             <div className="panel-header">
               <div className="view-title">
                 <h2>{viewMode === "preview" ? "Preview" : "Code"}</h2>
-                <span>{viewMode === "preview" ? preview?.url ?? "not running" : selectedFile?.path ?? "no selection"}</span>
+                <span>{viewMode === "preview" ? previewLabel : selectedFile?.path ?? "no selection"}</span>
               </div>
               <ViewToggle mode={viewMode} onChange={setViewMode} />
             </div>
             {viewMode === "preview" ? (
               preview ? (
-                <iframe title="Project preview" src={preview.url} />
+                <iframe
+                  ref={previewFrameRef}
+                  title="Project preview"
+                  src={preview.url}
+                  onLoad={sendSelectionModeToPreview}
+                />
               ) : (
                 <div className="empty-state">
-                  <h2>Preview is stopped</h2>
-                  <p>Install dependencies if needed, then start the internal snapshot preview.</p>
+                  <h2>{previewStarting ? "Preview is starting" : "Preview is stopped"}</h2>
+                  <p>
+                    {previewStarting
+                      ? "Installing dependencies if needed, then starting the internal snapshot preview."
+                      : "Install dependencies if needed, then start the internal snapshot preview."}
+                  </p>
                 </div>
               )
             ) : (
@@ -608,7 +838,7 @@ export default function App() {
                   spellCheck={false}
                 />
                 <div className="code-actions">
-                  <button onClick={handleSaveCode} disabled={!selectedFile || busy}>
+                  <button onClick={handleSaveCode} disabled={!selectedFile || snapshotEditingDisabled}>
                     Save Snapshot Code
                   </button>
                 </div>
@@ -622,13 +852,25 @@ export default function App() {
           onContextMenu={(event) => openPanelMenu(event, "inspector")}
         >
           <div className="panel-header">
-            <h2>{isInspectorCollapsed ? "I" : "Inspector"}</h2>
+            <h2>{isInspectorCollapsed ? "T" : "Tools"}</h2>
             <div className="sidebar-header-actions">
               {!isInspectorCollapsed && <span>{selectedNode?.type ?? "none"}</span>}
             </div>
           </div>
           {!isInspectorCollapsed && (
-            selectedNode ? (
+            <>
+              <div className="tool-palette">
+                <button
+                  className={`tool-button ${selectionToolActive ? "active" : ""}`}
+                  onClick={toggleSelectionTool}
+                  aria-pressed={selectionToolActive}
+                  title="Select preview element"
+                  aria-label="Select preview element"
+                >
+                  <CursorIcon />
+                </button>
+              </div>
+              {selectedNode ? (
               <>
                 <div className="selected-card">
                   <strong>{selectedNode.displayName}</strong>
@@ -639,7 +881,295 @@ export default function App() {
                 </div>
 
                 <div className="control-group">
-                  <h3>Style</h3>
+                  <div className="control-heading">
+                    <h3>Alignment</h3>
+                  </div>
+                  <div className="icon-grid six">
+                    <button onClick={() => handleAlignment("flex-start")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>L</button>
+                    <button onClick={() => handleAlignment("center")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>C</button>
+                    <button onClick={() => handleAlignment("flex-end")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>R</button>
+                    <button onClick={() => handleAlignment(undefined, "flex-start")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>T</button>
+                    <button onClick={() => handleAlignment(undefined, "center")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>M</button>
+                    <button onClick={() => handleAlignment(undefined, "flex-end")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>B</button>
+                  </div>
+                  <div className="control-heading">
+                    <h3>Position</h3>
+                  </div>
+                  <div className="two-col">
+                    <label>
+                      X
+                      <input
+                        value={toolX}
+                        onChange={(event) => setToolX(event.target.value)}
+                        onBlur={() => handleTransformChange()}
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      />
+                    </label>
+                    <label>
+                      Y
+                      <input
+                        value={toolY}
+                        onChange={(event) => setToolY(event.target.value)}
+                        onBlur={() => handleTransformChange()}
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      />
+                    </label>
+                  </div>
+                  <label>
+                    Rotation
+                    <input
+                      value={toolRotation}
+                      onChange={(event) => setToolRotation(event.target.value)}
+                      onBlur={() => handleTransformChange()}
+                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                    />
+                  </label>
+                </div>
+
+                <div className="control-group">
+                  <div className="control-heading">
+                    <h3>Layout</h3>
+                  </div>
+                  <div className="two-col">
+                    <label>
+                      W
+                      <input
+                        value={toolWidth}
+                        onChange={(event) => setToolWidth(event.target.value)}
+                        onBlur={() => handleDimensionsChange()}
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      />
+                    </label>
+                    <label>
+                      H
+                      <input
+                        value={toolHeight}
+                        onChange={(event) => setToolHeight(event.target.value)}
+                        onBlur={() => handleDimensionsChange()}
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      />
+                    </label>
+                  </div>
+                  <div className="two-col">
+                    <label>
+                      Padding
+                      <input
+                        value={toolPadding}
+                        onChange={(event) => setToolPadding(event.target.value)}
+                        onBlur={() => handleLayoutSpacingChange()}
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      />
+                    </label>
+                    <label>
+                      Gap
+                      <input
+                        value={toolGap}
+                        onChange={(event) => setToolGap(event.target.value)}
+                        onBlur={() => handleLayoutSpacingChange()}
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="control-group">
+                  <div className="control-heading">
+                    <h3>Typography</h3>
+                  </div>
+                  <div className="two-col">
+                    <label>
+                      Size
+                      <input
+                        value={toolFontSize}
+                        onChange={(event) => setToolFontSize(event.target.value)}
+                        onBlur={() => handleTypographyChange()}
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      />
+                    </label>
+                    <label>
+                      Weight
+                      <select
+                        value={toolFontWeight}
+                        onChange={(event) => handleTypographyChange(toolFontSize, event.target.value)}
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      >
+                        <option value="300">Light</option>
+                        <option value="400">Regular</option>
+                        <option value="500">Medium</option>
+                        <option value="600">Semibold</option>
+                        <option value="700">Bold</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="color-picker">
+                    <button
+                      className="selected-color-button"
+                      onClick={() => setOpenColorPalette((current) => (current === "color" ? null : "color"))}
+                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                    >
+                      <span className="selected-color-swatch" style={{ background: selectedTextColor }} />
+                      <span>{selectedTextColor}</span>
+                    </button>
+                    {openColorPalette === "color" && (
+                      <div className="color-map">
+                        {COLOR_PRESETS.map((value) => (
+                          <button
+                            key={`text-${value}`}
+                            className="color-swatch"
+                            style={{ background: value }}
+                            onClick={() => handleColorStyle("color", value)}
+                            disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                            title={`Text ${value}`}
+                            aria-label={`Text ${value}`}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="control-group">
+                  <div className="control-heading">
+                    <h3>Appearance</h3>
+                  </div>
+                  <div className="two-col">
+                    <label>
+                      Opacity
+                      <input
+                        value={toolOpacity}
+                        onChange={(event) => setToolOpacity(event.target.value)}
+                        onBlur={() => handleOpacityChange(toolOpacity)}
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      />
+                    </label>
+                    <label>
+                      Corner radius
+                      <input
+                        value={toolRadius}
+                        onChange={(event) => setToolRadius(event.target.value)}
+                        onBlur={() => handleRadiusChange(toolRadius)}
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      />
+                    </label>
+                  </div>
+                  <div className="preset-grid">
+                    {OPACITY_PRESETS.map((value) => (
+                      <button key={`opacity-${value}`} onClick={() => handleOpacityChange(value)} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>
+                        {value}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="control-group">
+                  <div className="control-heading">
+                    <h3>Fill</h3>
+                  </div>
+                  <div className="color-picker">
+                    <button
+                      className="selected-color-button"
+                      onClick={() =>
+                        setOpenColorPalette((current) =>
+                          current === "background-color" ? null : "background-color",
+                        )
+                      }
+                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                    >
+                      <span className="selected-color-swatch" style={{ background: selectedBackgroundColor }} />
+                      <span>{selectedBackgroundColor}</span>
+                    </button>
+                    {openColorPalette === "background-color" && (
+                      <div className="color-map">
+                        {COLOR_PRESETS.map((value) => (
+                          <button
+                            key={`fill-${value}`}
+                            className="color-swatch"
+                            style={{ background: value }}
+                            onClick={() => handleColorStyle("background-color", value)}
+                            disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                            title={`Fill ${value}`}
+                            aria-label={`Fill ${value}`}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="control-group">
+                  <div className="control-heading">
+                    <h3>Stroke</h3>
+                  </div>
+                  <div className="color-picker">
+                    <button
+                      className="selected-color-button"
+                      onClick={() => setOpenColorPalette((current) => (current === "stroke" ? null : "stroke"))}
+                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                    >
+                      <span className="selected-color-swatch" style={{ background: strokeColor }} />
+                      <span>{strokeColor}</span>
+                    </button>
+                    {openColorPalette === "stroke" && (
+                      <div className="color-map">
+                        {COLOR_PRESETS.map((value) => (
+                          <button
+                            key={`stroke-${value}`}
+                            className="color-swatch"
+                            style={{ background: value }}
+                            onClick={() => handleStrokeChange(value, strokeWeight)}
+                            disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                            title={`Stroke ${value}`}
+                            aria-label={`Stroke ${value}`}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <label>
+                    Weight
+                    <input
+                      value={strokeWeight}
+                      onChange={(event) => setStrokeWeight(event.target.value)}
+                      onBlur={() => handleStrokeChange(strokeColor, strokeWeight)}
+                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                    />
+                  </label>
+                </div>
+
+                <div className="control-group">
+                  <div className="control-heading">
+                    <h3>Effects</h3>
+                  </div>
+                  <div className="effect-row">
+                    <input
+                      type="checkbox"
+                      checked={shadowValue !== "none"}
+                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      onChange={(event) => {
+                        const next = event.target.checked ? SHADOW_PRESETS[1].value : "none";
+                        setShadowValue(next);
+                        handleQuickStyle("box-shadow", next);
+                      }}
+                    />
+                    <select
+                      value={shadowValue}
+                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      onChange={(event) => {
+                        setShadowValue(event.target.value);
+                        handleQuickStyle("box-shadow", event.target.value);
+                      }}
+                    >
+                      {SHADOW_PRESETS.map((preset) => (
+                        <option key={preset.value} value={preset.value}>
+                          {preset.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="control-group">
+                  <h3>Advanced Style</h3>
                   <div className="segmented">
                     {(["tailwind", "inline", "css"] as StyleMode[]).map((mode) => (
                       <button
@@ -665,7 +1195,7 @@ export default function App() {
                     Value
                     <input value={styleValue} onChange={(event) => setStyleValue(event.target.value)} />
                   </label>
-                  <button onClick={handleApplyStyle} disabled={busy || selectedNode.type !== "jsx_element"}>
+                  <button onClick={handleApplyStyle} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>
                     Apply Style
                   </button>
                 </div>
@@ -678,7 +1208,7 @@ export default function App() {
                         <button
                           key={operation}
                           onClick={() => handleStructureOperation(operation)}
-                          disabled={busy || selectedNode.type !== "jsx_element"}
+                          disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                         >
                           {operation.replace("_", " ")}
                         </button>
@@ -702,9 +1232,10 @@ export default function App() {
             ) : (
               <div className="empty-state compact">
                 <h2>No node selected</h2>
-                <p>Choose an item in the tree or click an instrumented preview element.</p>
+                <p>Enable the selection tool, then click a preview element.</p>
               </div>
-            )
+            )}
+            </>
           )}
         </aside>
       </section>
@@ -746,11 +1277,7 @@ export default function App() {
 
 function TopProgress({ loading }: { loading: LoadingState }) {
   return (
-    <div className="top-progress" role="status" aria-live="polite">
-      <div className="top-progress-meta">
-        <span>{loading.detail}</span>
-        <span>{loading.progress}%</span>
-      </div>
+    <div className="top-progress" role="progressbar" aria-label={loading.detail} aria-valuenow={loading.progress}>
       <div className="progress-track" aria-label={`${loading.progress}% complete`}>
         <div className="progress-fill" style={{ width: `${loading.progress}%` }} />
         <div className="progress-shine" />
@@ -835,6 +1362,14 @@ function SyncIcon() {
   );
 }
 
+function CursorIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5.6 2.8c-.7-.5-1.7 0-1.7.9l.7 17c0 1.1 1.4 1.6 2.1.8l4.1-5.1c.5-.6 1.2-.9 2-.9h6c1.1 0 1.6-1.4.8-2.1L5.6 2.8Z" />
+    </svg>
+  );
+}
+
 function PanelContextMenu({
   menu,
   isCollapsed,
@@ -844,12 +1379,13 @@ function PanelContextMenu({
   isCollapsed: boolean;
   onSelect: () => void;
 }) {
-  const panelName = menu.target === "project" ? "Project" : "Inspector";
+  const panelName = menu.target === "project" ? "Project" : "Tools";
   return (
     <div
       className="panel-context-menu"
       style={{ left: menu.x, top: menu.y }}
       role="menu"
+      onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
     >
@@ -993,6 +1529,17 @@ function FileBadge({ file }: { file: ChangedFile }) {
 
 function replaceFile(files: SourceFile[], path: string, content: string): SourceFile[] {
   return files.map((file) => (file.path === path ? { ...file, content } : file));
+}
+
+function toCssPx(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "0px";
+  }
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    return `${trimmed}px`;
+  }
+  return trimmed;
 }
 
 function operationToEditType(operation: StructureOperation): EditOperation["operationType"] {

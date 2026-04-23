@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead, BufReader};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex};
@@ -108,6 +109,11 @@ pub struct BaselineEntry {
     pub snapshot_exists: bool,
 }
 
+enum PreviewOutput {
+    Url(String),
+    Log(String),
+}
+
 #[tauri::command]
 fn pick_project_directory() -> Result<Option<String>, String> {
     Ok(rfd::FileDialog::new()
@@ -133,7 +139,6 @@ fn open_project(
     let snapshot_root = app_data_root()?.join("snapshots").join(&id);
     fs::create_dir_all(&snapshot_root).map_err(to_string)?;
     copy_project_snapshot(&original, &snapshot_root).map_err(to_string)?;
-    create_baseline_manifest(&original, &snapshot_root)?;
 
     let original_app_root = original.join(&app_root_relative);
     let snapshot_app_root = snapshot_root.join(&app_root_relative);
@@ -288,19 +293,7 @@ fn install_dependencies(
 ) -> Result<String, String> {
     let snapshot = get_snapshot(&state, &snapshot_id)?;
     let root = PathBuf::from(snapshot.app_root_path);
-    let mut command = Command::new(&snapshot.package_manager);
-    command.arg("install").current_dir(root);
-    let output = command.output().map_err(|error| {
-        format!(
-            "Failed to run {} install. Ensure the package manager is installed and on PATH. {}",
-            snapshot.package_manager, error
-        )
-    })?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+    run_dependency_install(&root, &snapshot.package_manager)
 }
 
 #[tauri::command]
@@ -311,6 +304,7 @@ fn start_preview(
     stop_preview(snapshot_id.clone(), state.clone()).ok();
     let snapshot = get_snapshot(&state, &snapshot_id)?;
     let root = PathBuf::from(&snapshot.app_root_path);
+    ensure_dependencies_installed(&root, &snapshot.package_manager)?;
     let package_text = fs::read_to_string(root.join("package.json")).unwrap_or_default();
     let (_, script) = detect_framework_and_script(&package_text);
     let port = free_port()?;
@@ -324,6 +318,7 @@ fn start_preview(
         .env("HOST", "127.0.0.1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    configure_command_environment(&mut command);
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -339,7 +334,7 @@ fn start_preview(
         collect_preview_output(stderr, url_sender);
     }
     let fallback_url = format!("http://127.0.0.1:{}", port);
-    let detected_url = wait_for_preview_url(&url_receiver, &fallback_url);
+    let detected_url = wait_for_preview_url(&url_receiver, &mut child, &fallback_url, port)?;
 
     state
         .preview_processes
@@ -745,7 +740,55 @@ fn configure_preview_args(command: &mut Command, framework: &str, port: u16) {
     }
 }
 
-fn collect_preview_output<R>(reader: R, sender: mpsc::Sender<String>)
+fn configure_command_environment(command: &mut Command) {
+    if let Some(path) = sanitized_command_path() {
+        command.env("PATH", path);
+    }
+}
+
+fn sanitized_command_path() -> Option<OsString> {
+    let inherited = std::env::var_os("PATH")?;
+    let paths = std::env::split_paths(&inherited)
+        .filter(|path| !path.ends_with(Path::new("node_modules/.bin")))
+        .collect::<Vec<_>>();
+    std::env::join_paths(paths).ok()
+}
+
+fn ensure_dependencies_installed(root: &Path, package_manager: &str) -> Result<(), String> {
+    if root.join("node_modules").is_dir() || root.join(".pnp.cjs").is_file() {
+        return Ok(());
+    }
+    run_dependency_install(root, package_manager)?;
+    if root.join("node_modules").is_dir() || root.join(".pnp.cjs").is_file() {
+        Ok(())
+    } else {
+        Err("Dependency install finished, but no node_modules or Yarn PnP manifest was found in the snapshot.".to_string())
+    }
+}
+
+fn run_dependency_install(root: &Path, package_manager: &str) -> Result<String, String> {
+    let mut command = Command::new(package_manager);
+    command.arg("install").current_dir(root);
+    configure_command_environment(&mut command);
+    let output = command.output().map_err(|error| {
+        format!(
+            "Failed to run {} install. Ensure the package manager is installed and on PATH. {}",
+            package_manager, error
+        )
+    })?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "{} install failed.\n\n{}{}",
+            package_manager, stdout, stderr
+        ))
+    }
+}
+
+fn collect_preview_output<R>(reader: R, sender: mpsc::Sender<PreviewOutput>)
 where
     R: io::Read + Send + 'static,
 {
@@ -753,28 +796,102 @@ where
         let url_regex = Regex::new(r#"http://127\.0\.0\.1:\d+(/[^\s]*)?"#).unwrap();
         let reader = BufReader::new(reader);
         for line in reader.lines().map_while(Result::ok) {
+            sender.send(PreviewOutput::Log(line.clone())).ok();
             if let Some(found) = url_regex.find(&line) {
-                sender.send(found.as_str().to_string()).ok();
+                sender
+                    .send(PreviewOutput::Url(found.as_str().to_string()))
+                    .ok();
             }
         }
     });
 }
 
-fn wait_for_preview_url(receiver: &mpsc::Receiver<String>, fallback_url: &str) -> String {
+fn wait_for_preview_url(
+    receiver: &mpsc::Receiver<PreviewOutput>,
+    child: &mut Child,
+    fallback_url: &str,
+    port: u16,
+) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(8);
+    let mut logs = Vec::new();
     while Instant::now() < deadline {
         match receiver.recv_timeout(Duration::from_millis(250)) {
-            Ok(url) => return url,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(PreviewOutput::Url(url)) => return Ok(url),
+            Ok(PreviewOutput::Log(line)) => {
+                logs.push(line);
+                if logs.len() > 80 {
+                    logs.remove(0);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        }
+        if let Some(status) = child.try_wait().map_err(to_string)? {
+            return Err(format!(
+                "Preview server exited before it became available ({}).{}",
+                status,
+                format_preview_logs(&logs)
+            ));
         }
     }
-    fallback_url.to_string()
+    if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        Ok(fallback_url.to_string())
+    } else if let Some(status) = child.try_wait().map_err(to_string)? {
+        Err(format!(
+            "Preview server exited before it became available ({}).{}",
+            status,
+            format_preview_logs(&logs)
+        ))
+    } else {
+        Err(format!(
+            "Preview server did not become reachable at {}.{}",
+            fallback_url,
+            format_preview_logs(&logs)
+        ))
+    }
 }
 
 fn free_port() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(to_string)?;
     Ok(listener.local_addr().map_err(to_string)?.port())
+}
+
+fn format_preview_logs(logs: &[String]) -> String {
+    if logs.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+    for line in logs
+        .iter()
+        .filter(|line| is_important_preview_log(line))
+        .take(8)
+    {
+        if !lines.contains(line) {
+            lines.push(line.clone());
+        }
+    }
+    for line in logs
+        .iter()
+        .rev()
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    format!("\n\nRecent preview output:\n{}", lines.join("\n"))
+}
+
+fn is_important_preview_log(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("cannot find")
+        || lower.contains("not found")
 }
 
 fn list_source_files(root: &Path, scan_root: &Path) -> Result<Vec<SourceFile>, String> {
@@ -1118,14 +1235,29 @@ fn read_clean_text(path: &Path) -> Result<Option<String>, String> {
 }
 
 fn sanitize_preview_instrumentation(content: &str) -> String {
+    let marked_selection_bridge = Regex::new(
+        r#"(?s)\n?/\* dev-design-selection-bridge-start \*/.*?/\* dev-design-selection-bridge-end \*/\n?"#,
+    )
+    .unwrap();
+    let selection_bridge = Regex::new(
+        r#"(?s)\n?if \(typeof window !== "undefined" && !Reflect\.get\(window, "__DEV_DESIGN_SELECTION_LISTENER__"\)\) \{.*?window\.addEventListener\("message", event => \{.*?\n\}\n"#,
+    )
+    .unwrap();
     let data_id =
         Regex::new(r#"\s+data-dev-design-id=(?:"[^"]*"|'[^']*'|\{["'][^"']*["']\})"#).unwrap();
     let click_capture = Regex::new(
+        r#"(?s)\s+onClickCapture=\{(?:\(event\)|event) => \{\s*const select = Reflect\.get\(window, "__DEV_DESIGN_SELECT__"\);.*?\n\s*\}\}"#,
+    )
+    .unwrap();
+    let legacy_click_capture = Regex::new(
         r#"(?s)\s+onClickCapture=\{\(event\) =>\s*window\.parent\.postMessage\(\{\s*type: "dev-design-select",\s*id: "[^"]+"\s*\}, "\*"\)\}"#,
     )
     .unwrap();
-    let without_click = click_capture.replace_all(content, "");
-    data_id.replace_all(&without_click, "").to_string()
+    let without_marked_bridge = marked_selection_bridge.replace_all(content, "");
+    let without_bridge = selection_bridge.replace_all(&without_marked_bridge, "");
+    let without_click = click_capture.replace_all(&without_bridge, "");
+    let without_legacy_click = legacy_click_capture.replace_all(&without_click, "");
+    data_id.replace_all(&without_legacy_click, "").to_string()
 }
 
 fn unified_diff(path: &str, old: &str, new: &str) -> String {

@@ -115,7 +115,7 @@ export function analyzeSourceFiles(files: SourceFile[]): AnalysisResult {
 
 export function instrumentReactSource(path: string, source: string): string {
   const ast = parseReact(path, source);
-  let changed = false;
+  let changed = ensureSelectionBridge(ast, source);
 
   traverse(ast, {
     JSXElement(path) {
@@ -128,36 +128,188 @@ export function instrumentReactSource(path: string, source: string): string {
         changed = true;
       }
 
-      if (!getJsxAttribute(opening, "onClickCapture")) {
-        opening.attributes.push(
-          t.jsxAttribute(
-            t.jsxIdentifier("onClickCapture"),
-            t.jsxExpressionContainer(
-              t.arrowFunctionExpression(
-                [t.identifier("event")],
-                t.callExpression(
-                  t.memberExpression(
-                    t.memberExpression(t.identifier("window"), t.identifier("parent")),
-                    t.identifier("postMessage"),
-                  ),
-                  [
-                    t.objectExpression([
-                      t.objectProperty(t.identifier("type"), t.stringLiteral("dev-design-select")),
-                      t.objectProperty(t.identifier("id"), t.stringLiteral(id)),
-                    ]),
-                    t.stringLiteral("*"),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
+      const existingClick = getJsxAttribute(opening, "onClickCapture");
+      if (!existingClick || isDevDesignClickAttribute(existingClick)) {
+        if (existingClick) {
+          opening.attributes = opening.attributes.filter((attribute) => attribute !== existingClick);
+        }
+        opening.attributes.push(makeSelectionClickAttribute(id));
         changed = true;
       }
     },
   });
 
   return changed ? generate(ast, { retainLines: false, comments: true }, source).code : source;
+}
+
+function ensureSelectionBridge(ast: ReturnType<typeof parseReact>, source: string): boolean {
+  if (source.includes("__DEV_DESIGN_OVERLAY__")) {
+    return false;
+  }
+  const bridge = parseReact("dev-design-selection-bridge.tsx", `
+/* dev-design-selection-bridge-start */
+if (typeof window !== "undefined" && !Reflect.get(window, "__DEV_DESIGN_SELECTION_LISTENER__")) {
+  Reflect.set(window, "__DEV_DESIGN_SELECTION_LISTENER__", true);
+  Reflect.set(window, "__DEV_DESIGN_SELECTION_MODE__", false);
+  Reflect.set(window, "__DEV_DESIGN_SELECTED_ELEMENT__", null);
+  const getDevDesignOverlay = () => {
+    let overlay = Reflect.get(window, "__DEV_DESIGN_OVERLAY__");
+    if (overlay) {
+      return overlay;
+    }
+    overlay = document.createElement("div");
+    Object.assign(overlay.style, {
+      position: "fixed",
+      left: "0px",
+      top: "0px",
+      width: "0px",
+      height: "0px",
+      display: "none",
+      pointerEvents: "none",
+      border: "2px solid #1493ff",
+      boxSizing: "border-box",
+      zIndex: "2147483647"
+    });
+    ["nw", "ne", "sw", "se"].forEach(position => {
+      const handle = document.createElement("div");
+      handle.dataset.handle = position;
+      Object.assign(handle.style, {
+        position: "absolute",
+        width: "8px",
+        height: "8px",
+        background: "#ffffff",
+        border: "2px solid #1493ff",
+        boxSizing: "border-box"
+      });
+      if (position.includes("n")) {
+        handle.style.top = "-5px";
+      } else {
+        handle.style.bottom = "-5px";
+      }
+      if (position.includes("w")) {
+        handle.style.left = "-5px";
+      } else {
+        handle.style.right = "-5px";
+      }
+      overlay.appendChild(handle);
+    });
+    const label = document.createElement("div");
+    label.dataset.label = "size";
+    Object.assign(label.style, {
+      position: "absolute",
+      left: "50%",
+      bottom: "-28px",
+      transform: "translateX(-50%)",
+      padding: "3px 7px",
+      borderRadius: "4px",
+      background: "#1493ff",
+      color: "#ffffff",
+      font: "700 12px/1.2 system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+      whiteSpace: "nowrap"
+    });
+    overlay.appendChild(label);
+    document.documentElement.appendChild(overlay);
+    Reflect.set(window, "__DEV_DESIGN_OVERLAY__", overlay);
+    return overlay;
+  };
+  const updateDevDesignOverlay = () => {
+    const overlay = Reflect.get(window, "__DEV_DESIGN_OVERLAY__");
+    const selected = Reflect.get(window, "__DEV_DESIGN_SELECTED_ELEMENT__");
+    if (!overlay || !selected || !Reflect.get(window, "__DEV_DESIGN_SELECTION_MODE__") || !document.documentElement.contains(selected)) {
+      if (overlay) {
+        overlay.style.display = "none";
+      }
+      return;
+    }
+    const rect = selected.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      overlay.style.display = "none";
+      return;
+    }
+    Object.assign(overlay.style, {
+      display: "block",
+      left: \`\${rect.left}px\`,
+      top: \`\${rect.top}px\`,
+      width: \`\${rect.width}px\`,
+      height: \`\${rect.height}px\`
+    });
+    const label = overlay.querySelector("[data-label='size']");
+    if (label) {
+      label.textContent = \`\${Math.round(rect.width)} x \${Math.round(rect.height)}\`;
+    }
+  };
+  Reflect.set(window, "__DEV_DESIGN_OVERLAY_UPDATE__", updateDevDesignOverlay);
+  Reflect.set(window, "__DEV_DESIGN_SELECT__", (event, id) => {
+    if (!Reflect.get(window, "__DEV_DESIGN_SELECTION_MODE__")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.target;
+    const element = target?.nodeType === 1 ? target : target?.parentElement;
+    const selected = element?.closest?.("[data-dev-design-id]");
+    const selectedId = selected?.getAttribute?.("data-dev-design-id") || id;
+    Reflect.set(window, "__DEV_DESIGN_SELECTED_ELEMENT__", selected);
+    getDevDesignOverlay();
+    updateDevDesignOverlay();
+    window.parent.postMessage({
+      type: "dev-design-select",
+      id: selectedId
+    }, "*");
+  });
+  window.addEventListener("message", event => {
+    if (event.data?.type === "dev-design-selection-mode") {
+      Reflect.set(window, "__DEV_DESIGN_SELECTION_MODE__", Boolean(event.data.enabled));
+      if (!event.data.enabled) {
+        Reflect.set(window, "__DEV_DESIGN_SELECTED_ELEMENT__", null);
+      }
+      getDevDesignOverlay();
+      updateDevDesignOverlay();
+    }
+  });
+  window.addEventListener("scroll", updateDevDesignOverlay, true);
+  window.addEventListener("resize", updateDevDesignOverlay);
+}
+/* dev-design-selection-bridge-end */
+`);
+  ast.program.body.unshift(...bridge.program.body);
+  return true;
+}
+
+function makeSelectionClickAttribute(id: string): t.JSXAttribute {
+  return t.jsxAttribute(
+    t.jsxIdentifier("onClickCapture"),
+    t.jsxExpressionContainer(
+      t.arrowFunctionExpression(
+        [t.identifier("event")],
+        t.blockStatement([
+          t.variableDeclaration("const", [
+            t.variableDeclarator(
+              t.identifier("select"),
+              t.callExpression(t.memberExpression(t.identifier("Reflect"), t.identifier("get")), [
+                t.identifier("window"),
+                t.stringLiteral("__DEV_DESIGN_SELECT__"),
+              ]),
+            ),
+          ]),
+          t.ifStatement(
+            t.identifier("select"),
+            t.blockStatement([
+              t.expressionStatement(t.callExpression(t.identifier("select"), [t.identifier("event"), t.stringLiteral(id)])),
+            ]),
+          ),
+        ]),
+      ),
+    ),
+  );
+}
+
+function isDevDesignClickAttribute(attribute: t.JSXAttribute): boolean {
+  if (!attribute.value) {
+    return false;
+  }
+  const code = generate(attribute.value).code;
+  return code.includes("dev-design-select") || code.includes("__DEV_DESIGN_SELECT__");
 }
 
 function collectJsxElements(filePath: string, source: string): JsxElementRecord[] {
