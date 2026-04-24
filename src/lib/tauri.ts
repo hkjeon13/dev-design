@@ -23,6 +23,10 @@ export function reloadSnapshot(snapshotId: string): Promise<OpenProjectResponse>
   return invoke<OpenProjectResponse>("reload_snapshot", { snapshotId });
 }
 
+export function deleteSnapshotAndReload(snapshotId: string): Promise<OpenProjectResponse> {
+  return invoke<OpenProjectResponse>("delete_snapshot_and_reload", { snapshotId });
+}
+
 export function listSnapshots(): Promise<OpenProjectResponse["snapshot"][]> {
   return invoke<OpenProjectResponse["snapshot"][]>("list_snapshots");
 }

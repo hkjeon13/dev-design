@@ -278,6 +278,39 @@ fn reload_snapshot(
 }
 
 #[tauri::command]
+fn delete_snapshot_and_reload(
+    snapshot_id: String,
+    state: tauri::State<AppState>,
+) -> Result<OpenProjectResponse, String> {
+    let previous_snapshot = get_snapshot(&state, &snapshot_id)?;
+    let previous_snapshot_path = PathBuf::from(&previous_snapshot.snapshot_path);
+    let original_path = previous_snapshot.original_path.clone();
+
+    stop_preview(snapshot_id.clone(), state.clone()).ok();
+    state
+        .snapshots
+        .lock()
+        .map_err(|_| "Snapshot state lock failed.".to_string())?
+        .remove(&snapshot_id);
+
+    let snapshots_root = app_data_root()?.join("snapshots");
+    if previous_snapshot_path.starts_with(&snapshots_root) && previous_snapshot_path.is_dir() {
+        fs::remove_dir_all(&previous_snapshot_path).map_err(to_string)?;
+    }
+
+    if let Some(recent_snapshot) = read_recent_snapshot()? {
+        if recent_snapshot.id == snapshot_id {
+            let recent_path = recent_snapshot_path()?;
+            if recent_path.is_file() {
+                fs::remove_file(recent_path).map_err(to_string)?;
+            }
+        }
+    }
+
+    open_project(original_path, state)
+}
+
+#[tauri::command]
 fn list_snapshots() -> Result<Vec<ProjectSnapshot>, String> {
     let snapshots_root = app_data_root()?.join("snapshots");
     if !snapshots_root.is_dir() {
@@ -664,6 +697,7 @@ pub fn run() {
             open_project,
             load_recent_snapshot,
             reload_snapshot,
+            delete_snapshot_and_reload,
             list_snapshots,
             checkout_snapshot,
             delete_snapshot,
@@ -701,7 +735,11 @@ fn app_data_root() -> Result<PathBuf, String> {
 }
 
 fn copy_project_snapshot(original: &Path, snapshot: &Path) -> io::Result<()> {
-    for entry in WalkDir::new(original).into_iter().filter_map(Result::ok) {
+    for entry in WalkDir::new(original)
+        .into_iter()
+        .filter_entry(|entry| entry.path() == original || !should_ignore_path(entry.path()))
+        .filter_map(Result::ok)
+    {
         let source = entry.path();
         if source == original || should_ignore_path(source) {
             continue;

@@ -11,6 +11,7 @@ import {
   applySync,
   checkoutSnapshot,
   createSyncPlan,
+  deleteSnapshotAndReload,
   deleteSnapshot,
   discardSnapshotChanges,
   installDependencies,
@@ -69,6 +70,30 @@ const SHADOW_PRESETS = [
   { label: "None", value: "none" },
   { label: "Drop shadow", value: "0 12px 30px rgba(15, 23, 42, 0.18)" },
   { label: "Soft", value: "0 8px 18px rgba(15, 23, 42, 0.12)" },
+];
+
+const ALIGNMENT_ACTIONS = [
+  { key: "justify-start", title: "Align left", axis: "horizontal", position: "start", justify: "flex-start" },
+  { key: "justify-center", title: "Align center", axis: "horizontal", position: "center", justify: "center" },
+  { key: "justify-end", title: "Align right", axis: "horizontal", position: "end", justify: "flex-end" },
+  { key: "align-start", title: "Align top", axis: "vertical", position: "start", align: "flex-start" },
+  { key: "align-center", title: "Align middle", axis: "vertical", position: "center", align: "center" },
+  { key: "align-end", title: "Align bottom", axis: "vertical", position: "end", align: "flex-end" },
+] as const;
+
+const STRUCTURE_ACTIONS: Array<{
+  operation: StructureOperation;
+  label: string;
+  title: string;
+  icon: "up" | "down" | "duplicate" | "delete" | "wrap" | "unwrap" | "insert";
+}> = [
+  { operation: "move_up", label: "Up", title: "Move up", icon: "up" },
+  { operation: "move_down", label: "Down", title: "Move down", icon: "down" },
+  { operation: "duplicate", label: "Duplicate", title: "Duplicate element", icon: "duplicate" },
+  { operation: "delete", label: "Delete", title: "Delete element", icon: "delete" },
+  { operation: "wrap", label: "Wrap", title: "Wrap element", icon: "wrap" },
+  { operation: "unwrap", label: "Unwrap", title: "Unwrap element", icon: "unwrap" },
+  { operation: "insert_child", label: "Insert", title: "Insert child", icon: "insert" },
 ];
 
 type StatusTone = "neutral" | "success" | "warning" | "error";
@@ -203,6 +228,9 @@ export default function App() {
         });
         await waitForPaint();
         setSnapshot(response.snapshot);
+        setSourceFiles(response.sourceFiles);
+        await refreshSnapshotList();
+        await waitForPaint();
         await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
         baselineTaskId.current += 1;
         setBaselineStatus(
@@ -387,6 +415,9 @@ export default function App() {
       });
       await waitForPaint();
       setSnapshot(response.snapshot);
+      setSourceFiles(response.sourceFiles);
+      await refreshSnapshotList();
+      await waitForPaint();
       await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
       recordBaselineInBackground(response.snapshot.id);
       setLoading({
@@ -435,6 +466,9 @@ export default function App() {
       });
       await waitForPaint();
       setSnapshot(response.snapshot);
+      setSourceFiles(response.sourceFiles);
+      await refreshSnapshotList();
+      await waitForPaint();
       await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
       recordBaselineInBackground(response.snapshot.id);
       setSelectedNodeId(null);
@@ -509,6 +543,9 @@ export default function App() {
       });
       await waitForPaint();
       setSnapshot(response.snapshot);
+      setSourceFiles(response.sourceFiles);
+      await refreshSnapshotList();
+      await waitForPaint();
       await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
       baselineTaskId.current += 1;
       setBaselineStatus(
@@ -539,31 +576,21 @@ export default function App() {
 
   async function handleDeleteSnapshot(snapshotId: string) {
     const isCurrent = snapshot?.id === snapshotId;
-    const currentOriginalPath = isCurrent ? snapshot?.originalPath : null;
-    const accepted = window.confirm(
-      isCurrent
-        ? "Delete the current snapshot? A fresh snapshot will be reloaded from the original project."
-        : "Delete this saved snapshot?",
-    );
-    if (!accepted) {
+    if (!isCurrent && !window.confirm("Delete this saved snapshot?")) {
       return;
     }
     setBusy(true);
     setLoading({
-      detail: isCurrent ? "Deleting current snapshot and reloading a fresh one." : "Deleting saved snapshot.",
-      progress: 45,
+      detail: isCurrent ? "Deleting cached snapshot and reloading from the original project." : "Deleting saved snapshot.",
+      progress: isCurrent ? 35 : 45,
     });
     updateStatus({
       tone: "neutral",
-      text: isCurrent ? "Deleting current snapshot and reloading..." : "Deleting saved snapshot...",
+      text: isCurrent ? "Deleting cached snapshot and reloading from original..." : "Deleting saved snapshot...",
     }, "Deleting snapshot");
     await waitForPaint();
     try {
       if (isCurrent) {
-        if (!currentOriginalPath) {
-          throw new Error("Current snapshot original path was not found.");
-        }
-        await deleteSnapshot(snapshotId);
         setSnapshotList((current) => current.filter((item) => item.id !== snapshotId));
         setSnapshot(null);
         setSourceFiles([]);
@@ -576,19 +603,22 @@ export default function App() {
         setSyncPlan(null);
         setSelectedSyncFiles(new Set());
         setEditLog([]);
-        updateStatus({ tone: "neutral", text: "Deleted current snapshot. Reloading a fresh one..." }, "Snapshot deleted");
+        updateStatus({ tone: "neutral", text: "Removed cached snapshot. Loading from original project..." }, "Reloading");
         setLoading({
-          detail: "Creating a fresh snapshot after deleting the current one.",
+          detail: "Creating a fresh snapshot from the original project without cached files.",
           progress: 58,
         });
         await waitForPaint();
-        const response = await openProject(currentOriginalPath);
+        const response = await deleteSnapshotAndReload(snapshotId);
         setLoading({
           detail: "Analyzing the reloaded snapshot.",
           progress: 72,
         });
         await waitForPaint();
         setSnapshot(response.snapshot);
+        setSourceFiles(response.sourceFiles);
+        await refreshSnapshotList();
+        await waitForPaint();
         await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
         recordBaselineInBackground(response.snapshot.id);
         setSelectedNodeId(null);
@@ -602,8 +632,8 @@ export default function App() {
         await refreshSnapshotList();
         updateStatus({
           tone: response.warnings.length > 0 ? "warning" : "success",
-          text: response.warnings[0] ?? "Deleted current snapshot and reloaded a fresh one.",
-        }, "Reloaded");
+          text: response.warnings[0] ?? "Deleted cached snapshot and loaded a fresh snapshot from original.",
+        }, "Fresh snapshot loaded");
         return;
       }
       await deleteSnapshot(snapshotId);
@@ -1279,7 +1309,7 @@ export default function App() {
                   title="Tools"
                   aria-label="Tools"
                 >
-                  T
+                  <ToolsIcon />
                 </button>
                 <button
                   className={`tool-button ${selectionToolActive ? "active" : ""}`}
@@ -1299,7 +1329,7 @@ export default function App() {
                   title="Saved snapshots"
                   aria-label="Saved snapshots"
                 >
-                  S
+                  <SnapshotsIcon />
                 </button>
               </div>
               {inspectorMode === "snapshots" ? (
@@ -1311,7 +1341,9 @@ export default function App() {
                   onCheckout={handleCheckoutSnapshot}
                   onDelete={handleDeleteSnapshot}
                 />
-              ) : selectedNode ? (
+              ) : (
+              <div className="tools-panel">
+              {selectedNode ? (
               <>
                 <div className="selected-card">
                   <div className="selected-card-heading">
@@ -1326,10 +1358,11 @@ export default function App() {
                       <ResetIcon />
                     </button>
                   </div>
-                  <span>{selectedNode.sourceFile}</span>
-                  <small>
-                    {selectedNode.sourceRange.start}-{selectedNode.sourceRange.end}
-                  </small>
+                  <div className="selected-card-meta">
+                    <span className="badge">{selectedNode.type}</span>
+                    <span>{selectedNode.sourceFile}</span>
+                    <small>{selectedNode.sourceRange.start}-{selectedNode.sourceRange.end}</small>
+                  </div>
                   {selectedElementMetrics?.nodeId === selectedNode.id && (
                     <div className="element-metrics" aria-label="Selected element size">
                       <span>W {formatMetricDisplay(selectedElementMetrics.width)}px</span>
@@ -1343,12 +1376,23 @@ export default function App() {
                     <h3>Alignment</h3>
                   </div>
                   <div className="icon-grid six">
-                    <button onClick={() => handleAlignment("flex-start")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>L</button>
-                    <button onClick={() => handleAlignment("center")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>C</button>
-                    <button onClick={() => handleAlignment("flex-end")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>R</button>
-                    <button onClick={() => handleAlignment(undefined, "flex-start")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>T</button>
-                    <button onClick={() => handleAlignment(undefined, "center")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>M</button>
-                    <button onClick={() => handleAlignment(undefined, "flex-end")} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>B</button>
+                    {ALIGNMENT_ACTIONS.map((action) => (
+                      <button
+                        key={action.key}
+                        className="align-button"
+                        onClick={() =>
+                          handleAlignment(
+                            "justify" in action ? action.justify : undefined,
+                            "align" in action ? action.align : undefined,
+                          )
+                        }
+                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                        title={action.title}
+                        aria-label={action.title}
+                      >
+                        <AlignmentIcon axis={action.axis} position={action.position} />
+                      </button>
+                    ))}
                   </div>
                   <div className="control-heading">
                     <h3>Position</h3>
@@ -1661,17 +1705,19 @@ export default function App() {
                 <div className="control-group">
                   <h3>Structure</h3>
                   <div className="structure-grid">
-                    {(["move_up", "move_down", "duplicate", "delete", "wrap", "unwrap", "insert_child"] as StructureOperation[]).map(
-                      (operation) => (
+                    {STRUCTURE_ACTIONS.map((action) => (
                         <button
-                          key={operation}
-                          onClick={() => handleStructureOperation(operation)}
+                          key={action.operation}
+                          className={action.operation === "delete" ? "danger-action" : ""}
+                          onClick={() => handleStructureOperation(action.operation)}
                           disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                          title={action.title}
+                          aria-label={action.title}
                         >
-                          {operation.replace("_", " ")}
+                          <StructureActionIcon icon={action.icon} />
+                          <span>{action.label}</span>
                         </button>
-                      ),
-                    )}
+                    ))}
                   </div>
                 </div>
 
@@ -1693,6 +1739,8 @@ export default function App() {
                 <p>Enable the selection tool, then click a preview element.</p>
               </div>
             )}
+              </div>
+              )}
             </>
           )}
         </aside>
@@ -1860,6 +1908,97 @@ function CursorIcon() {
   );
 }
 
+function ToolsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h10" />
+      <path d="M18 7h2" />
+      <circle cx="16" cy="7" r="2" />
+      <path d="M4 17h2" />
+      <path d="M10 17h10" />
+      <circle cx="8" cy="17" r="2" />
+    </svg>
+  );
+}
+
+function SnapshotsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 5h12v12" />
+      <path d="M5 7h12v12H5z" />
+    </svg>
+  );
+}
+
+function AlignmentIcon({
+  axis,
+  position,
+}: {
+  axis: "horizontal" | "vertical";
+  position: "start" | "center" | "end";
+}) {
+  const marker = position === "start" ? 7 : position === "center" ? 12 : 17;
+  if (axis === "horizontal") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 5v14" />
+        <path d="M9 8h10" />
+        <path d="M9 16h7" />
+        <circle cx={marker} cy="12" r="1.7" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 5h14" />
+      <path d="M8 9v10" />
+      <path d="M16 9v7" />
+      <circle cx="12" cy={marker} r="1.7" />
+    </svg>
+  );
+}
+
+function StructureActionIcon({
+  icon,
+}: {
+  icon: "up" | "down" | "duplicate" | "delete" | "wrap" | "unwrap" | "insert";
+}) {
+  if (icon === "delete") {
+    return <TrashIcon />;
+  }
+  if (icon === "duplicate") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="8" y="8" width="10" height="10" rx="2" />
+        <path d="M6 14H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1" />
+      </svg>
+    );
+  }
+  if (icon === "wrap" || icon === "unwrap") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d={icon === "wrap" ? "M8 7H5v10h3" : "M5 7h3v10H5"} />
+        <path d={icon === "wrap" ? "M16 7h3v10h-3" : "M19 7h-3v10h3"} />
+        <path d="M10 12h4" />
+      </svg>
+    );
+  }
+  if (icon === "insert") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 5v14" />
+        <path d="M5 12h14" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d={icon === "up" ? "M12 19V5" : "M12 5v14"} />
+      <path d={icon === "up" ? "m7 10 5-5 5 5" : "m7 14 5 5 5-5"} />
+    </svg>
+  );
+}
+
 function PanelContextMenu({
   menu,
   isCollapsed,
@@ -1974,8 +2113,8 @@ function SnapshotPanel({
                     className="icon-button danger"
                     onClick={() => onDelete(item.id)}
                     disabled={busy}
-                    title={isCurrent ? "Delete current and load fresh snapshot" : "Delete snapshot"}
-                    aria-label={isCurrent ? "Delete current and load fresh snapshot" : "Delete snapshot"}
+                    title={isCurrent ? "Delete cached snapshot and reload from original" : "Delete snapshot"}
+                    aria-label={isCurrent ? "Delete cached snapshot and reload from original" : "Delete snapshot"}
                   >
                     <TrashIcon />
                   </button>
@@ -2165,11 +2304,11 @@ function formatSnapshotDate(value: string) {
     return value;
   }
   return date.toLocaleString([], {
-    year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
   });
 }
 

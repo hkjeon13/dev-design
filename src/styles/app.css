@@ -403,9 +403,11 @@ button:disabled {
 }
 
 .tool-palette {
-  padding: 12px;
+  padding: 10px 12px;
   border-bottom: 1px solid #e5eaf0;
-  display: flex;
+  background: #f8fafc;
+  display: grid;
+  grid-template-columns: repeat(3, 36px) minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -421,14 +423,29 @@ button:disabled {
 .tool-button svg {
   width: 18px;
   height: 18px;
-  fill: currentColor;
-  stroke: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tool-button svg path,
+.tool-button svg circle,
+.tool-button svg rect {
+  vector-effect: non-scaling-stroke;
 }
 
 .tool-button.active {
   background: #1f2933;
   border-color: #1f2933;
   color: #ffffff;
+}
+
+.tools-panel {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 0 10px;
 }
 
 .snapshot-panel {
@@ -621,26 +638,48 @@ button:disabled {
 
 .selected-card,
 .control-group {
-  margin: 12px;
-  padding: 12px;
+  margin: 10px 12px;
+  padding: 10px;
   border: 1px solid #e5eaf0;
-  border-radius: 8px;
+  border-radius: 7px;
   display: grid;
-  gap: 10px;
+  gap: 9px;
 }
 
 .selected-card {
+  background: #f8fafc;
   overflow-wrap: anywhere;
 }
 
 .selected-card-heading {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 36px;
+  grid-template-columns: minmax(0, 1fr) 30px;
   align-items: center;
   gap: 8px;
 }
 
 .selected-card-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-card-heading .icon-button {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+}
+
+.selected-card-meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.selected-card-meta span:not(.badge),
+.selected-card-meta small {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -671,6 +710,13 @@ button:disabled {
   min-width: 0;
 }
 
+.control-heading h3 {
+  color: #1f2933;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .two-col {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -691,6 +737,21 @@ button:disabled {
   padding: 0;
   font-size: 12px;
   font-weight: 700;
+}
+
+.align-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.align-button svg path,
+.align-button svg circle {
+  vector-effect: non-scaling-stroke;
 }
 
 .segmented {
@@ -803,15 +864,18 @@ label {
   display: grid;
   gap: 6px;
   color: #465666;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 input,
 select {
-  min-height: 34px;
+  min-height: 32px;
   border: 1px solid #c7d0d9;
   border-radius: 6px;
   padding: 0 10px;
   background: #ffffff;
+  color: #1f2933;
 }
 
 .structure-grid {
@@ -821,7 +885,37 @@ select {
 }
 
 .structure-grid button {
-  overflow-wrap: anywhere;
+  min-height: 32px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.structure-grid button svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.structure-grid button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.structure-grid .danger-action {
+  border-color: #f0b6b6;
+  color: #b42323;
+  background: #fff7f7;
 }
 
 .edit-log {
