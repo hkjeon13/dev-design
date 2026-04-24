@@ -1578,7 +1578,12 @@ function SyncReview({
       <section className="sync-modal">
         <div className="panel-header">
           <h2>Sync Review</h2>
-          <button onClick={onClose}>Close</button>
+          <div className="modal-header-actions">
+            <button onClick={() => onDiscard(discardableFiles)} disabled={busy || discardableFiles.length === 0}>
+              Discard Snapshot Changes
+            </button>
+            <button onClick={onClose}>Close</button>
+          </div>
         </div>
         <div className="sync-warning">
           {plan.warnings.map((warning) => (

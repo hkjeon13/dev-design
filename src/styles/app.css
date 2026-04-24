@@ -891,12 +891,20 @@ select {
   color: #a33b3b;
 }
 
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .modal-actions {
   border-top: 1px solid #e5eaf0;
   padding: 10px 12px;
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  background: #ffffff;
+  box-shadow: 0 -8px 18px rgb(31 41 51 / 0.04);
 }
 
 @media (max-width: 1180px) {
