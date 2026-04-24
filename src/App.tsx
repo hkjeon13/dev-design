@@ -564,6 +564,19 @@ export default function App() {
           throw new Error("Current snapshot original path was not found.");
         }
         await deleteSnapshot(snapshotId);
+        setSnapshotList((current) => current.filter((item) => item.id !== snapshotId));
+        setSnapshot(null);
+        setSourceFiles([]);
+        setAnalysis(null);
+        setSelectedNodeId(null);
+        setSelectedElementMetrics(null);
+        setPreview(null);
+        setPreviewStarting(false);
+        setSelectionToolActive(false);
+        setSyncPlan(null);
+        setSelectedSyncFiles(new Set());
+        setEditLog([]);
+        updateStatus({ tone: "neutral", text: "Deleted current snapshot. Reloading a fresh one..." }, "Snapshot deleted");
         setLoading({
           detail: "Creating a fresh snapshot after deleting the current one.",
           progress: 58,
@@ -1961,8 +1974,8 @@ function SnapshotPanel({
                     className="icon-button danger"
                     onClick={() => onDelete(item.id)}
                     disabled={busy}
-                    title={isCurrent ? "Delete current snapshot and reload" : "Delete snapshot"}
-                    aria-label={isCurrent ? "Delete current snapshot and reload" : "Delete snapshot"}
+                    title={isCurrent ? "Delete current and load fresh snapshot" : "Delete snapshot"}
+                    aria-label={isCurrent ? "Delete current and load fresh snapshot" : "Delete snapshot"}
                   >
                     <TrashIcon />
                   </button>
