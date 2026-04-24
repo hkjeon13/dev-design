@@ -534,6 +534,7 @@ button:disabled {
 .code-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
   padding: 8px;
   border-top: 1px solid #e5eaf0;
 }
@@ -550,6 +551,37 @@ button:disabled {
 
 .selected-card {
   overflow-wrap: anywhere;
+}
+
+.selected-card-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 8px;
+}
+
+.selected-card-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.element-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.element-metrics span {
+  min-height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #cfd9e2;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1f2933;
+  font-weight: 700;
 }
 
 .control-heading {

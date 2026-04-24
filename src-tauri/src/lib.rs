@@ -514,6 +514,38 @@ fn refresh_from_original(
 }
 
 #[tauri::command]
+fn discard_snapshot_changes(
+    snapshot_id: String,
+    files: Vec<String>,
+    state: tauri::State<AppState>,
+) -> Result<Vec<SourceFile>, String> {
+    let snapshot = get_snapshot(&state, &snapshot_id)?;
+    let original_root = PathBuf::from(snapshot.original_path);
+    let snapshot_root = PathBuf::from(&snapshot.snapshot_path);
+    let app_root = PathBuf::from(&snapshot.app_root_path);
+    let mut manifest = read_baseline_manifest(&snapshot_root)?;
+
+    for rel in files {
+        let original_path = safe_join(&original_root, &rel)?;
+        let snapshot_path = safe_join(&snapshot_root, &rel)?;
+        if original_path.exists() {
+            if !is_text_like(&original_path) {
+                return Err(format!("{} is not a supported text file.", rel));
+            }
+            if let Some(parent) = snapshot_path.parent() {
+                fs::create_dir_all(parent).map_err(to_string)?;
+            }
+            fs::copy(&original_path, &snapshot_path).map_err(to_string)?;
+        } else if snapshot_path.exists() {
+            fs::remove_file(&snapshot_path).map_err(to_string)?;
+        }
+        update_manifest_entry(&mut manifest, &rel, &original_root, &snapshot_root)?;
+    }
+    write_baseline_manifest(&snapshot_root, &manifest)?;
+    list_source_files(&snapshot_root, &app_root)
+}
+
+#[tauri::command]
 fn record_baseline(snapshot_id: String, state: tauri::State<AppState>) -> Result<(), String> {
     let snapshot = get_snapshot(&state, &snapshot_id)?;
     create_baseline_manifest(
@@ -538,6 +570,7 @@ pub fn run() {
             create_sync_plan,
             apply_sync,
             refresh_from_original,
+            discard_snapshot_changes,
             record_baseline
         ])
         .run(tauri::generate_context!())

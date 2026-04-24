@@ -252,9 +252,16 @@ if (typeof window !== "undefined" && !Reflect.get(window, "__DEV_DESIGN_SELECTIO
     Reflect.set(window, "__DEV_DESIGN_SELECTED_ELEMENT__", selected);
     getDevDesignOverlay();
     updateDevDesignOverlay();
+    const rect = selected?.getBoundingClientRect?.();
     window.parent.postMessage({
       type: "dev-design-select",
-      id: selectedId
+      id: selectedId,
+      bounds: rect ? {
+        width: rect.width,
+        height: rect.height,
+        left: rect.left,
+        top: rect.top
+      } : null
     }, "*");
   });
   window.addEventListener("message", event => {
@@ -296,6 +303,87 @@ function makeSelectionClickAttribute(id: string): t.JSXAttribute {
             t.identifier("select"),
             t.blockStatement([
               t.expressionStatement(t.callExpression(t.identifier("select"), [t.identifier("event"), t.stringLiteral(id)])),
+            ]),
+          ),
+          t.ifStatement(
+            t.callExpression(t.memberExpression(t.identifier("Reflect"), t.identifier("get")), [
+              t.identifier("window"),
+              t.stringLiteral("__DEV_DESIGN_SELECTION_MODE__"),
+            ]),
+            t.blockStatement([
+              t.variableDeclaration("const", [
+                t.variableDeclarator(t.identifier("target"), t.memberExpression(t.identifier("event"), t.identifier("target"))),
+              ]),
+              t.variableDeclaration("const", [
+                t.variableDeclarator(
+                  t.identifier("element"),
+                  t.conditionalExpression(
+                    t.binaryExpression(
+                      "===",
+                      t.optionalMemberExpression(t.identifier("target"), t.identifier("nodeType"), false, true),
+                      t.numericLiteral(1),
+                    ),
+                    t.identifier("target"),
+                    t.optionalMemberExpression(t.identifier("target"), t.identifier("parentElement"), false, true),
+                  ),
+                ),
+              ]),
+              t.variableDeclaration("const", [
+                t.variableDeclarator(
+                  t.identifier("selected"),
+                  t.optionalCallExpression(
+                    t.optionalMemberExpression(t.identifier("element"), t.identifier("closest"), false, true),
+                    [t.stringLiteral("[data-dev-design-id]")],
+                    true,
+                  ),
+                ),
+              ]),
+              t.variableDeclaration("const", [
+                t.variableDeclarator(
+                  t.identifier("selectedId"),
+                  t.logicalExpression(
+                    "||",
+                    t.optionalCallExpression(
+                      t.optionalMemberExpression(t.identifier("selected"), t.identifier("getAttribute"), false, true),
+                      [t.stringLiteral("data-dev-design-id")],
+                      true,
+                    ),
+                    t.stringLiteral(id),
+                  ),
+                ),
+              ]),
+              t.variableDeclaration("const", [
+                t.variableDeclarator(
+                  t.identifier("rect"),
+                  t.optionalCallExpression(
+                    t.optionalMemberExpression(t.identifier("selected"), t.identifier("getBoundingClientRect"), false, true),
+                    [],
+                    true,
+                  ),
+                ),
+              ]),
+              t.expressionStatement(
+                t.callExpression(t.memberExpression(t.memberExpression(t.identifier("window"), t.identifier("parent")), t.identifier("postMessage")), [
+                  t.objectExpression([
+                    t.objectProperty(t.identifier("type"), t.stringLiteral("dev-design-select")),
+                    t.objectProperty(t.identifier("id"), t.identifier("selectedId")),
+                    t.objectProperty(
+                      t.identifier("bounds"),
+                      t.conditionalExpression(
+                        t.identifier("rect"),
+                        t.objectExpression([
+                          t.objectProperty(t.identifier("width"), t.memberExpression(t.identifier("rect"), t.identifier("width"))),
+                          t.objectProperty(t.identifier("height"), t.memberExpression(t.identifier("rect"), t.identifier("height"))),
+                          t.objectProperty(t.identifier("left"), t.memberExpression(t.identifier("rect"), t.identifier("left"))),
+                          t.objectProperty(t.identifier("top"), t.memberExpression(t.identifier("rect"), t.identifier("top"))),
+                        ]),
+                        t.nullLiteral(),
+                      ),
+                    ),
+                  ]),
+                  t.stringLiteral("*"),
+                ]),
+              ),
             ]),
           ),
         ]),

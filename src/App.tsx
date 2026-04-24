@@ -10,6 +10,7 @@ import {
 import {
   applySync,
   createSyncPlan,
+  discardSnapshotChanges,
   installDependencies,
   loadRecentSnapshot,
   openProject,
@@ -80,6 +81,12 @@ interface LoadingState {
   progress: number;
 }
 
+interface SelectedElementMetrics {
+  nodeId: string;
+  width: number;
+  height: number;
+}
+
 type PanelContextTarget = "project" | "inspector";
 
 interface PanelContextMenuState {
@@ -128,6 +135,7 @@ export default function App() {
   const [syncPlan, setSyncPlan] = useState<SyncPlan | null>(null);
   const [selectedSyncFiles, setSelectedSyncFiles] = useState<Set<string>>(new Set());
   const [editLog, setEditLog] = useState<EditOperation[]>([]);
+  const [selectedElementMetrics, setSelectedElementMetrics] = useState<SelectedElementMetrics | null>(null);
   const didRestoreRecent = useRef(false);
   const baselineTaskId = useRef(0);
   const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
@@ -145,6 +153,7 @@ export default function App() {
   const selectedNodeCanEdit = selectedNode?.type === "jsx_element";
   const previewControlActive = preview !== null || previewStarting;
   const previewLabel = preview?.url ?? (previewStarting ? "starting" : "not running");
+  const hasCodeDraftChanges = selectedFile !== null && codeDraft !== selectedFile.content;
 
   useEffect(() => {
     if (selectedFile) {
@@ -218,11 +227,28 @@ export default function App() {
       }
       if (selectionToolActive && nodeMap.has(event.data.id)) {
         setSelectedNodeId(event.data.id);
+        const bounds = event.data.bounds;
+        if (bounds && typeof bounds.width === "number" && typeof bounds.height === "number") {
+          const width = roundMetric(bounds.width);
+          const height = roundMetric(bounds.height);
+          setSelectedElementMetrics({ nodeId: event.data.id, width, height });
+          setToolWidth(formatMetricInput(width));
+          setToolHeight(formatMetricInput(height));
+        } else {
+          setSelectedElementMetrics(null);
+        }
       }
     }
     window.addEventListener("message", handlePreviewMessage);
     return () => window.removeEventListener("message", handlePreviewMessage);
   }, [nodeMap, selectionToolActive]);
+
+  useEffect(() => {
+    if (!selectedNodeId || selectedElementMetrics?.nodeId === selectedNodeId) {
+      return;
+    }
+    setSelectedElementMetrics(null);
+  }, [selectedElementMetrics?.nodeId, selectedNodeId]);
 
   useEffect(() => {
     sendSelectionModeToPreview();
@@ -454,6 +480,15 @@ export default function App() {
   async function handleDimensionsChange(width = toolWidth, height = toolHeight) {
     setToolWidth(width);
     setToolHeight(height);
+    setSelectedElementMetrics((current) =>
+      current && current.nodeId === selectedNodeId
+        ? {
+            ...current,
+            width: roundMetric(parseCssNumber(width) ?? current.width),
+            height: roundMetric(parseCssNumber(height) ?? current.height),
+          }
+        : current,
+    );
     await applyStyleUpdates(
       [
         { property: "width", value: toCssPx(width) },
@@ -614,6 +649,14 @@ export default function App() {
     }
   }
 
+  function handleDiscardCodeDraft() {
+    if (!selectedFile) {
+      return;
+    }
+    setCodeDraft(selectedFile.content);
+    setStatus({ tone: "neutral", text: `Discarded unsaved edits for ${selectedFile.path}` });
+  }
+
   async function handleCreateSyncPlan() {
     if (baselineUnavailable) {
       setStatus({ tone: "warning", text: "Snapshot baseline is still being prepared. Try again shortly." });
@@ -679,6 +722,39 @@ export default function App() {
       setSyncPlan(plan);
       setSelectedSyncFiles(new Set(plan.changedFiles.filter((file) => file.canApply).map((file) => file.path)));
       setStatus({ tone: "success", text: `Refreshed ${files.length} file(s) from the original project.` });
+    } catch (error) {
+      setStatus({ tone: "error", text: String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDiscardSnapshotChanges(files: string[]) {
+    if (!snapshot || files.length === 0) {
+      return;
+    }
+    const accepted = window.confirm(
+      `Discard snapshot changes for ${files.length} file(s) and restore them from the original project?`,
+    );
+    if (!accepted) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const refreshedFiles = await discardSnapshotChanges(snapshot.id, files);
+      await reanalyzeAndPersist(snapshot.id, refreshedFiles);
+      const selectedFileStillExists =
+        selectedFile === null || refreshedFiles.some((file) => file.path === selectedFile.path);
+      if (!selectedFileStillExists) {
+        setSelectedNodeId(null);
+        setSelectedElementMetrics(null);
+      }
+      if (syncPlan) {
+        const plan = await createSyncPlan(snapshot.id);
+        setSyncPlan(plan);
+        setSelectedSyncFiles(new Set(plan.changedFiles.filter((file) => file.canApply).map((file) => file.path)));
+      }
+      setStatus({ tone: "success", text: `Discarded snapshot changes for ${files.length} file(s).` });
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
@@ -838,6 +914,9 @@ export default function App() {
                   spellCheck={false}
                 />
                 <div className="code-actions">
+                  <button onClick={handleDiscardCodeDraft} disabled={!selectedFile || !hasCodeDraftChanges || busy}>
+                    Discard Draft
+                  </button>
                   <button onClick={handleSaveCode} disabled={!selectedFile || snapshotEditingDisabled}>
                     Save Snapshot Code
                   </button>
@@ -873,11 +952,28 @@ export default function App() {
               {selectedNode ? (
               <>
                 <div className="selected-card">
-                  <strong>{selectedNode.displayName}</strong>
+                  <div className="selected-card-heading">
+                    <strong>{selectedNode.displayName}</strong>
+                    <button
+                      className="icon-button"
+                      onClick={() => selectedFile && handleDiscardSnapshotChanges([selectedFile.path])}
+                      disabled={!selectedFile || snapshotEditingDisabled}
+                      title="Reset selected file from original"
+                      aria-label="Reset selected file from original"
+                    >
+                      <ResetIcon />
+                    </button>
+                  </div>
                   <span>{selectedNode.sourceFile}</span>
                   <small>
                     {selectedNode.sourceRange.start}-{selectedNode.sourceRange.end}
                   </small>
+                  {selectedElementMetrics?.nodeId === selectedNode.id && (
+                    <div className="element-metrics" aria-label="Selected element size">
+                      <span>W {formatMetricDisplay(selectedElementMetrics.width)}px</span>
+                      <span>H {formatMetricDisplay(selectedElementMetrics.height)}px</span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="control-group">
@@ -1268,6 +1364,7 @@ export default function App() {
           onClose={() => setSyncPlan(null)}
           onApply={handleApplySync}
           onRefresh={handleRefreshFromOriginal}
+          onDiscard={handleDiscardSnapshotChanges}
           busy={busy}
         />
       )}
@@ -1362,6 +1459,15 @@ function SyncIcon() {
   );
 }
 
+function ResetIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7v5h5" />
+      <path d="M5.2 12a7 7 0 1 0 2-5" />
+    </svg>
+  );
+}
+
 function CursorIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1438,6 +1544,7 @@ function SyncReview({
   onClose,
   onApply,
   onRefresh,
+  onDiscard,
   busy,
 }: {
   plan: SyncPlan;
@@ -1446,6 +1553,7 @@ function SyncReview({
   onClose: () => void;
   onApply: () => void;
   onRefresh: (files: string[]) => void;
+  onDiscard: (files: string[]) => void;
   busy: boolean;
 }) {
   const [activeFile, setActiveFile] = useState<ChangedFile | null>(plan.changedFiles[0] ?? null);
@@ -1458,6 +1566,9 @@ function SyncReview({
   const hasUnsafeSelection = selectedChangedFiles.some((file) => !file.canApply);
   const refreshableFiles = selectedChangedFiles
     .filter((file) => file.originalChangedSinceOpen && !file.snapshotChangedSinceOpen)
+    .map((file) => file.path);
+  const discardableFiles = selectedChangedFiles
+    .filter((file) => file.snapshotChangedSinceOpen)
     .map((file) => file.path);
   const hasConflicts = plan.changedFiles.some(
     (file) => file.originalChangedSinceOpen && file.snapshotChangedSinceOpen,
@@ -1504,6 +1615,9 @@ function SyncReview({
           <button onClick={() => onRefresh(refreshableFiles)} disabled={busy || refreshableFiles.length === 0}>
             Refresh From Original
           </button>
+          <button onClick={() => onDiscard(discardableFiles)} disabled={busy || discardableFiles.length === 0}>
+            Discard Snapshot Changes
+          </button>
           <button onClick={onClose}>Cancel</button>
           <button className="primary" onClick={onApply} disabled={busy || selectedFiles.size === 0 || hasUnsafeSelection}>
             Apply Selected
@@ -1540,6 +1654,23 @@ function toCssPx(value: string) {
     return `${trimmed}px`;
   }
   return trimmed;
+}
+
+function roundMetric(value: number) {
+  return Math.round(value * 10) / 10;
+}
+
+function formatMetricInput(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function formatMetricDisplay(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function parseCssNumber(value: string) {
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function operationToEditType(operation: StructureOperation): EditOperation["operationType"] {

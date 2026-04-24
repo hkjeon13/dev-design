@@ -59,6 +59,10 @@ export function refreshFromOriginal(snapshotId: string, files: string[]): Promis
   return invoke<SourceFile[]>("refresh_from_original", { snapshotId, files });
 }
 
+export function discardSnapshotChanges(snapshotId: string, files: string[]): Promise<SourceFile[]> {
+  return invoke<SourceFile[]>("discard_snapshot_changes", { snapshotId, files });
+}
+
 export function recordBaseline(snapshotId: string): Promise<void> {
   return invoke<void>("record_baseline", { snapshotId });
 }
