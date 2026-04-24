@@ -12,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -107,6 +107,20 @@ pub struct BaselineEntry {
     pub snapshot_hash: Option<String>,
     pub original_exists: bool,
     pub snapshot_exists: bool,
+    #[serde(default)]
+    pub original_len: Option<u64>,
+    #[serde(default)]
+    pub snapshot_len: Option<u64>,
+    #[serde(default)]
+    pub original_modified_ms: Option<u64>,
+    #[serde(default)]
+    pub snapshot_modified_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct FileFingerprint {
+    len: u64,
+    modified_ms: u64,
 }
 
 enum PreviewOutput {
@@ -230,6 +244,94 @@ fn load_recent_snapshot(
         source_files,
         warnings,
     }))
+}
+
+#[tauri::command]
+fn reload_snapshot(
+    snapshot_id: String,
+    state: tauri::State<AppState>,
+) -> Result<OpenProjectResponse, String> {
+    let previous_snapshot = get_snapshot(&state, &snapshot_id)?;
+    let previous_snapshot_path = PathBuf::from(&previous_snapshot.snapshot_path);
+    let original_path = previous_snapshot.original_path.clone();
+
+    let mut response = open_project(original_path, state.clone())?;
+
+    stop_preview(snapshot_id.clone(), state.clone()).ok();
+    state
+        .snapshots
+        .lock()
+        .map_err(|_| "Snapshot state lock failed.".to_string())?
+        .remove(&snapshot_id);
+
+    let snapshots_root = app_data_root()?.join("snapshots");
+    if previous_snapshot_path.starts_with(&snapshots_root) && previous_snapshot_path.is_dir() {
+        if let Err(error) = fs::remove_dir_all(&previous_snapshot_path) {
+            response.warnings.push(format!(
+                "Reloaded the snapshot, but could not remove the previous snapshot directory: {}",
+                error
+            ));
+        }
+    }
+
+    Ok(response)
+}
+
+#[tauri::command]
+fn list_snapshots() -> Result<Vec<ProjectSnapshot>, String> {
+    let snapshots_root = app_data_root()?.join("snapshots");
+    if !snapshots_root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut snapshots = Vec::new();
+    for entry in fs::read_dir(snapshots_root).map_err(to_string)? {
+        let entry = entry.map_err(to_string)?;
+        if !entry.file_type().map_err(to_string)?.is_dir() {
+            continue;
+        }
+        let details_path = snapshot_details_path(&entry.path());
+        if !details_path.is_file() {
+            continue;
+        }
+        let content = fs::read_to_string(details_path).map_err(to_string)?;
+        if let Ok(snapshot) = serde_json::from_str::<ProjectSnapshot>(&content) {
+            snapshots.push(snapshot);
+        }
+    }
+    snapshots.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(snapshots)
+}
+
+#[tauri::command]
+fn checkout_snapshot(
+    snapshot_id: String,
+    state: tauri::State<AppState>,
+) -> Result<OpenProjectResponse, String> {
+    let snapshot = read_snapshot_details(&snapshot_id)?;
+    let response = open_existing_snapshot(snapshot.clone())?;
+    state
+        .snapshots
+        .lock()
+        .map_err(|_| "Snapshot state lock failed.".to_string())?
+        .insert(snapshot.id.clone(), snapshot.clone());
+    save_recent_snapshot(&snapshot)?;
+    Ok(response)
+}
+
+#[tauri::command]
+fn delete_snapshot(snapshot_id: String, state: tauri::State<AppState>) -> Result<(), String> {
+    stop_preview(snapshot_id.clone(), state.clone()).ok();
+    state
+        .snapshots
+        .lock()
+        .map_err(|_| "Snapshot state lock failed.".to_string())?
+        .remove(&snapshot_id);
+    let snapshot_root = app_data_root()?.join("snapshots").join(&snapshot_id);
+    let snapshots_root = app_data_root()?.join("snapshots");
+    if snapshot_root.starts_with(&snapshots_root) && snapshot_root.is_dir() {
+        fs::remove_dir_all(snapshot_root).map_err(to_string)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -561,6 +663,10 @@ pub fn run() {
             pick_project_directory,
             open_project,
             load_recent_snapshot,
+            reload_snapshot,
+            list_snapshots,
+            checkout_snapshot,
+            delete_snapshot,
             list_snapshot_files,
             read_snapshot_file,
             write_snapshot_file,
@@ -1046,6 +1152,47 @@ fn read_recent_snapshot() -> Result<Option<ProjectSnapshot>, String> {
     Ok(Some(snapshot))
 }
 
+fn read_snapshot_details(snapshot_id: &str) -> Result<ProjectSnapshot, String> {
+    let snapshot_root = app_data_root()?.join("snapshots").join(snapshot_id);
+    let path = snapshot_details_path(&snapshot_root);
+    if !path.is_file() {
+        return Err("Snapshot details were not found.".to_string());
+    }
+    let content = fs::read_to_string(path).map_err(to_string)?;
+    serde_json::from_str(&content).map_err(to_string)
+}
+
+fn open_existing_snapshot(snapshot: ProjectSnapshot) -> Result<OpenProjectResponse, String> {
+    let snapshot_root = PathBuf::from(&snapshot.snapshot_path);
+    let snapshot_app_root = PathBuf::from(&snapshot.app_root_path);
+    if !snapshot_root.is_dir() || !snapshot_app_root.is_dir() {
+        return Err("Snapshot files were not found.".to_string());
+    }
+    let mut warnings = Vec::new();
+    if !Path::new(&snapshot.original_path).is_dir() {
+        warnings.push(
+            "The original project path no longer exists. Snapshot editing is available, but sync will fail until the project is reopened.".to_string(),
+        );
+    }
+    if !manifest_path(&snapshot_root).exists() {
+        warnings.push(
+            "Baseline manifest is missing. Reopen the project before syncing changes.".to_string(),
+        );
+    }
+    let source_files = list_source_files(&snapshot_root, &snapshot_app_root)?;
+    if !source_files
+        .iter()
+        .any(|file| file.path.ends_with(".tsx") || file.path.ends_with(".jsx"))
+    {
+        warnings.push("No TSX/JSX files were detected in the snapshot.".to_string());
+    }
+    Ok(OpenProjectResponse {
+        snapshot,
+        source_files,
+        warnings,
+    })
+}
+
 fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(to_string)?;
@@ -1092,6 +1239,8 @@ fn update_manifest_entry(
 ) -> Result<(), String> {
     let original_path = safe_join(original_root, rel)?;
     let snapshot_path = safe_join(snapshot_root, rel)?;
+    let original_fingerprint = file_fingerprint(&original_path)?;
+    let snapshot_fingerprint = file_fingerprint(&snapshot_path)?;
     let original_hash = file_hash(&original_path)?;
     let snapshot_hash = file_hash(&snapshot_path)?;
     let original_exists = original_hash.is_some();
@@ -1105,6 +1254,18 @@ fn update_manifest_entry(
                 snapshot_hash,
                 original_exists,
                 snapshot_exists,
+                original_len: original_fingerprint
+                    .as_ref()
+                    .map(|fingerprint| fingerprint.len),
+                snapshot_len: snapshot_fingerprint
+                    .as_ref()
+                    .map(|fingerprint| fingerprint.len),
+                original_modified_ms: original_fingerprint
+                    .as_ref()
+                    .map(|fingerprint| fingerprint.modified_ms),
+                snapshot_modified_ms: snapshot_fingerprint
+                    .as_ref()
+                    .map(|fingerprint| fingerprint.modified_ms),
             },
         );
     } else {
@@ -1117,9 +1278,10 @@ fn build_sync_plan_files(
     original_root: &Path,
     snapshot_root: &Path,
 ) -> Result<Vec<ChangedFile>, String> {
-    let manifest = read_baseline_manifest(snapshot_root)?;
+    let mut manifest = read_baseline_manifest(snapshot_root)?;
     let paths = collect_sync_paths(original_root, snapshot_root, &manifest)?;
     let mut changed_files = Vec::new();
+    let mut manifest_updated = false;
 
     for rel in paths {
         let baseline = manifest
@@ -1132,11 +1294,37 @@ fn build_sync_plan_files(
                 snapshot_hash: None,
                 original_exists: false,
                 snapshot_exists: false,
+                original_len: None,
+                snapshot_len: None,
+                original_modified_ms: None,
+                snapshot_modified_ms: None,
             });
         let original_path = safe_join(original_root, &rel)?;
         let snapshot_path = safe_join(snapshot_root, &rel)?;
-        let original_hash = file_hash(&original_path)?;
-        let snapshot_hash = file_hash(&snapshot_path)?;
+        let original_fingerprint = file_fingerprint(&original_path)?;
+        let snapshot_fingerprint = file_fingerprint(&snapshot_path)?;
+        let original_unchanged = fingerprint_matches(
+            &original_fingerprint,
+            baseline.original_exists,
+            baseline.original_len,
+            baseline.original_modified_ms,
+        );
+        let snapshot_unchanged = fingerprint_matches(
+            &snapshot_fingerprint,
+            baseline.snapshot_exists,
+            baseline.snapshot_len,
+            baseline.snapshot_modified_ms,
+        );
+        let original_hash = if original_unchanged {
+            baseline.original_hash.clone()
+        } else {
+            file_hash(&original_path)?
+        };
+        let snapshot_hash = if snapshot_unchanged {
+            baseline.snapshot_hash.clone()
+        } else {
+            file_hash(&snapshot_path)?
+        };
         let original_exists = original_hash.is_some();
         let snapshot_exists = snapshot_hash.is_some();
         let original_changed =
@@ -1144,6 +1332,28 @@ fn build_sync_plan_files(
         let snapshot_changed =
             snapshot_hash != baseline.snapshot_hash || snapshot_exists != baseline.snapshot_exists;
         let current_differs = original_hash != snapshot_hash || original_exists != snapshot_exists;
+        if !original_changed || !snapshot_changed {
+            if let Some(entry) = manifest.files.get_mut(&rel) {
+                if !original_changed
+                    && update_clean_fingerprint(
+                        &mut entry.original_len,
+                        &mut entry.original_modified_ms,
+                        &original_fingerprint,
+                    )
+                {
+                    manifest_updated = true;
+                }
+                if !snapshot_changed
+                    && update_clean_fingerprint(
+                        &mut entry.snapshot_len,
+                        &mut entry.snapshot_modified_ms,
+                        &snapshot_fingerprint,
+                    )
+                {
+                    manifest_updated = true;
+                }
+            }
+        }
         if !current_differs {
             continue;
         }
@@ -1203,6 +1413,10 @@ fn build_sync_plan_files(
         });
     }
 
+    if manifest_updated {
+        write_baseline_manifest(snapshot_root, &manifest)?;
+    }
+
     changed_files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(changed_files)
 }
@@ -1243,6 +1457,57 @@ fn collect_current_text_paths(
         paths.insert(relative_path(root, entry.path())?);
     }
     Ok(())
+}
+
+fn file_fingerprint(path: &Path) -> Result<Option<FileFingerprint>, String> {
+    if !path.exists() || !path.is_file() || !is_text_like(path) {
+        return Ok(None);
+    }
+    let metadata = fs::metadata(path).map_err(to_string)?;
+    if metadata.len() > MAX_TEXT_FILE_BYTES {
+        return Ok(None);
+    }
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0);
+    Ok(Some(FileFingerprint {
+        len: metadata.len(),
+        modified_ms,
+    }))
+}
+
+fn fingerprint_matches(
+    current: &Option<FileFingerprint>,
+    baseline_exists: bool,
+    baseline_len: Option<u64>,
+    baseline_modified_ms: Option<u64>,
+) -> bool {
+    match (baseline_exists, current) {
+        (false, None) => true,
+        (true, Some(fingerprint)) => {
+            baseline_len == Some(fingerprint.len)
+                && baseline_modified_ms == Some(fingerprint.modified_ms)
+        }
+        _ => false,
+    }
+}
+
+fn update_clean_fingerprint(
+    baseline_len: &mut Option<u64>,
+    baseline_modified_ms: &mut Option<u64>,
+    current: &Option<FileFingerprint>,
+) -> bool {
+    let next_len = current.as_ref().map(|fingerprint| fingerprint.len);
+    let next_modified_ms = current.as_ref().map(|fingerprint| fingerprint.modified_ms);
+    if *baseline_len == next_len && *baseline_modified_ms == next_modified_ms {
+        return false;
+    }
+    *baseline_len = next_len;
+    *baseline_modified_ms = next_modified_ms;
+    true
 }
 
 fn file_hash(path: &Path) -> Result<Option<String>, String> {

@@ -117,7 +117,7 @@ button:disabled {
 .brand-copy {
   min-width: 0;
   display: grid;
-  gap: 4px;
+  gap: 2px;
   align-content: center;
 }
 
@@ -129,6 +129,15 @@ button:disabled {
 .brand-copy p {
   margin: 0;
   line-height: 1.25;
+}
+
+.brand-copy small {
+  color: #7b8997;
+  font-size: 12px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .brand h1,
@@ -420,6 +429,77 @@ button:disabled {
   background: #1f2933;
   border-color: #1f2933;
   color: #ffffff;
+}
+
+.snapshot-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.snapshot-panel-actions {
+  padding: 10px 12px;
+  border-bottom: 1px solid #e5eaf0;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.snapshot-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.snapshot-item {
+  border: 1px solid #e5eaf0;
+  border-radius: 6px;
+  padding: 7px 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr) auto;
+  align-items: center;
+  gap: 8px;
+  background: #ffffff;
+  min-height: 42px;
+}
+
+.snapshot-item.current {
+  border-color: #8cc7b2;
+  background: #f3fbf7;
+}
+
+.snapshot-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.snapshot-item strong,
+.snapshot-item span,
+.snapshot-item small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snapshot-item span,
+.snapshot-item small {
+  color: #627282;
+}
+
+.snapshot-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.snapshot-item-actions .icon-button {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
 }
 
 .stage {
@@ -771,7 +851,7 @@ select {
   width: min(1120px, 100%);
   height: min(780px, 100%);
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto auto 1fr auto;
   overflow: hidden;
 }
 
@@ -783,6 +863,43 @@ select {
 
 .sync-warning p {
   margin: 0 0 4px;
+}
+
+.sync-quick-actions {
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e5eaf0;
+  background: #ffffff;
+}
+
+.sync-title-close {
+  margin-left: auto;
+}
+
+.sync-quick-summary {
+  min-width: 0;
+  color: #465666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-quick-summary strong {
+  color: #1f2933;
+}
+
+.danger {
+  border-color: #d96b6b;
+  color: #9f2f2f;
+  background: #fff5f5;
+}
+
+.danger:hover:not(:disabled) {
+  border-color: #b83d3d;
 }
 
 .sync-content {

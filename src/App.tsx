@@ -9,14 +9,18 @@ import {
 } from "./lib/jsxTransforms";
 import {
   applySync,
+  checkoutSnapshot,
   createSyncPlan,
+  deleteSnapshot,
   discardSnapshotChanges,
   installDependencies,
+  listSnapshots,
   loadRecentSnapshot,
   openProject,
   pickProjectDirectory,
   recordBaseline,
   refreshFromOriginal,
+  reloadSnapshot,
   startPreview,
   stopPreview,
   writeSnapshotFile,
@@ -70,6 +74,7 @@ const SHADOW_PRESETS = [
 type StatusTone = "neutral" | "success" | "warning" | "error";
 type ViewMode = "preview" | "code";
 type BaselineStatus = "idle" | "recording" | "ready" | "error";
+type InspectorMode = "tools" | "snapshots";
 
 interface StatusMessage {
   tone: StatusTone;
@@ -79,6 +84,11 @@ interface StatusMessage {
 interface LoadingState {
   detail: string;
   progress: number;
+}
+
+interface ActivityMessage {
+  text: string;
+  timestamp: Date;
 }
 
 interface SelectedElementMetrics {
@@ -104,6 +114,7 @@ export default function App() {
   const [previewStarting, setPreviewStarting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<StatusMessage | null>(null);
+  const [activity, setActivity] = useState<ActivityMessage | null>(null);
   const [loading, setLoading] = useState<LoadingState | null>(null);
   const [styleMode, setStyleMode] = useState<StyleMode>("tailwind");
   const [styleProperty, setStyleProperty] = useState("width");
@@ -130,10 +141,12 @@ export default function App() {
   const [shadowValue, setShadowValue] = useState(SHADOW_PRESETS[1].value);
   const [isProjectSidebarCollapsed, setProjectSidebarCollapsed] = useState(false);
   const [isInspectorCollapsed, setInspectorCollapsed] = useState(false);
+  const [inspectorMode, setInspectorMode] = useState<InspectorMode>("tools");
   const [panelMenu, setPanelMenu] = useState<PanelContextMenuState | null>(null);
   const [baselineStatus, setBaselineStatus] = useState<BaselineStatus>("idle");
   const [syncPlan, setSyncPlan] = useState<SyncPlan | null>(null);
   const [selectedSyncFiles, setSelectedSyncFiles] = useState<Set<string>>(new Set());
+  const [snapshotList, setSnapshotList] = useState<ProjectSnapshot[]>([]);
   const [editLog, setEditLog] = useState<EditOperation[]>([]);
   const [selectedElementMetrics, setSelectedElementMetrics] = useState<SelectedElementMetrics | null>(null);
   const didRestoreRecent = useRef(false);
@@ -154,6 +167,7 @@ export default function App() {
   const previewControlActive = preview !== null || previewStarting;
   const previewLabel = preview?.url ?? (previewStarting ? "starting" : "not running");
   const hasCodeDraftChanges = selectedFile !== null && codeDraft !== selectedFile.content;
+  const activityLabel = activity ? `${activity.text} at ${formatActivityTime(activity.timestamp)}` : "No recent activity";
 
   useEffect(() => {
     if (selectedFile) {
@@ -209,6 +223,7 @@ export default function App() {
           tone: response.warnings.length > 0 ? "warning" : "success",
           text: response.warnings[0] ?? `Restored recent snapshot: ${response.snapshot.originalPath}`,
         });
+        setActivity({ text: "Restored", timestamp: new Date() });
       } catch (error) {
         setStatus({ tone: "warning", text: `Could not restore recent snapshot: ${String(error)}` });
       } finally {
@@ -318,6 +333,13 @@ export default function App() {
     );
   }
 
+  function updateStatus(message: StatusMessage, activityText?: string) {
+    setStatus(message);
+    if (activityText) {
+      setActivity({ text: activityText, timestamp: new Date() });
+    }
+  }
+
   function recordBaselineInBackground(snapshotId: string) {
     const taskId = baselineTaskId.current + 1;
     baselineTaskId.current = taskId;
@@ -351,7 +373,7 @@ export default function App() {
       setBusy(false);
       return;
     }
-    setStatus({ tone: "neutral", text: "Opening project snapshot..." });
+    updateStatus({ tone: "neutral", text: "Opening project snapshot..." }, "Opening");
     setLoading({
       detail: "Creating an internal snapshot from the selected directory.",
       progress: 18,
@@ -376,10 +398,204 @@ export default function App() {
       setPreviewStarting(false);
       setSelectionToolActive(false);
       setSyncPlan(null);
-      setStatus({
+      updateStatus({
         tone: response.warnings.length > 0 ? "warning" : "success",
         text: response.warnings[0] ?? `Snapshot created at ${response.snapshot.snapshotPath}`,
+      }, "Opened");
+    } catch (error) {
+      setStatus({ tone: "error", text: String(error) });
+    } finally {
+      setLoading(null);
+      setBusy(false);
+    }
+  }
+
+  async function handleReloadSnapshot() {
+    if (!snapshot) {
+      return;
+    }
+    const accepted = window.confirm(
+      "Delete the current internal snapshot and reload a fresh snapshot from the original project?",
+    );
+    if (!accepted) {
+      return;
+    }
+    setBusy(true);
+    setLoading({
+      detail: "Reloading a fresh internal snapshot from the original project.",
+      progress: 18,
+    });
+    updateStatus({ tone: "neutral", text: "Reloading project snapshot..." }, "Reloading");
+    await waitForPaint();
+    try {
+      const response = await reloadSnapshot(snapshot.id);
+      setLoading({
+        detail: "Analyzing the reloaded snapshot.",
+        progress: 62,
       });
+      await waitForPaint();
+      setSnapshot(response.snapshot);
+      await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
+      recordBaselineInBackground(response.snapshot.id);
+      setSelectedNodeId(null);
+      setSelectedElementMetrics(null);
+      setPreview(null);
+      setPreviewStarting(false);
+      setSelectionToolActive(false);
+      setSyncPlan(null);
+      setSelectedSyncFiles(new Set());
+      setEditLog([]);
+      setLoading({
+        detail: "Rebuilt the project tree from the reloaded snapshot.",
+        progress: 90,
+      });
+      updateStatus({
+        tone: response.warnings.length > 0 ? "warning" : "success",
+        text: response.warnings[0] ?? "Reloaded a fresh internal snapshot.",
+      }, "Reloaded");
+    } catch (error) {
+      setStatus({ tone: "error", text: String(error) });
+    } finally {
+      setLoading(null);
+      setBusy(false);
+    }
+  }
+
+  async function refreshSnapshotList() {
+    const snapshots = await listSnapshots();
+    setSnapshotList(snapshots);
+  }
+
+  async function handleOpenSnapshotsPanel() {
+    setInspectorMode("snapshots");
+    setInspectorCollapsed(false);
+    setBusy(true);
+    setLoading({
+      detail: "Loading saved snapshots.",
+      progress: 45,
+    });
+    updateStatus({ tone: "neutral", text: "Loading saved snapshots..." }, "Loading snapshots");
+    await waitForPaint();
+    try {
+      await refreshSnapshotList();
+      updateStatus({ tone: "success", text: "Loaded saved snapshots." }, "Snapshots loaded");
+    } catch (error) {
+      setStatus({ tone: "error", text: String(error) });
+    } finally {
+      setLoading(null);
+      setBusy(false);
+    }
+  }
+
+  async function handleCheckoutSnapshot(snapshotId: string) {
+    if (snapshot?.id === snapshotId) {
+      return;
+    }
+    setBusy(true);
+    setLoading({
+      detail: "Checking out the selected saved snapshot.",
+      progress: 28,
+    });
+    updateStatus({ tone: "neutral", text: "Checking out snapshot..." }, "Checking out");
+    await waitForPaint();
+    try {
+      if (snapshot && previewControlActive) {
+        await stopPreview(snapshot.id);
+      }
+      const response = await checkoutSnapshot(snapshotId);
+      setLoading({
+        detail: "Analyzing checked out snapshot.",
+        progress: 72,
+      });
+      await waitForPaint();
+      setSnapshot(response.snapshot);
+      await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
+      baselineTaskId.current += 1;
+      setBaselineStatus(
+        response.warnings.some((warning) => warning.includes("Baseline manifest is missing"))
+          ? "error"
+          : "ready",
+      );
+      setSelectedNodeId(null);
+      setSelectedElementMetrics(null);
+      setPreview(null);
+      setPreviewStarting(false);
+      setSelectionToolActive(false);
+      setSyncPlan(null);
+      setSelectedSyncFiles(new Set());
+      setEditLog([]);
+      await refreshSnapshotList();
+      updateStatus({
+        tone: response.warnings.length > 0 ? "warning" : "success",
+        text: response.warnings[0] ?? "Checked out saved snapshot.",
+      }, "Checked out");
+    } catch (error) {
+      setStatus({ tone: "error", text: String(error) });
+    } finally {
+      setLoading(null);
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteSnapshot(snapshotId: string) {
+    const isCurrent = snapshot?.id === snapshotId;
+    const currentOriginalPath = isCurrent ? snapshot?.originalPath : null;
+    const accepted = window.confirm(
+      isCurrent
+        ? "Delete the current snapshot? A fresh snapshot will be reloaded from the original project."
+        : "Delete this saved snapshot?",
+    );
+    if (!accepted) {
+      return;
+    }
+    setBusy(true);
+    setLoading({
+      detail: isCurrent ? "Deleting current snapshot and reloading a fresh one." : "Deleting saved snapshot.",
+      progress: 45,
+    });
+    updateStatus({
+      tone: "neutral",
+      text: isCurrent ? "Deleting current snapshot and reloading..." : "Deleting saved snapshot...",
+    }, "Deleting snapshot");
+    await waitForPaint();
+    try {
+      if (isCurrent) {
+        if (!currentOriginalPath) {
+          throw new Error("Current snapshot original path was not found.");
+        }
+        await deleteSnapshot(snapshotId);
+        setLoading({
+          detail: "Creating a fresh snapshot after deleting the current one.",
+          progress: 58,
+        });
+        await waitForPaint();
+        const response = await openProject(currentOriginalPath);
+        setLoading({
+          detail: "Analyzing the reloaded snapshot.",
+          progress: 72,
+        });
+        await waitForPaint();
+        setSnapshot(response.snapshot);
+        await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
+        recordBaselineInBackground(response.snapshot.id);
+        setSelectedNodeId(null);
+        setSelectedElementMetrics(null);
+        setPreview(null);
+        setPreviewStarting(false);
+        setSelectionToolActive(false);
+        setSyncPlan(null);
+        setSelectedSyncFiles(new Set());
+        setEditLog([]);
+        await refreshSnapshotList();
+        updateStatus({
+          tone: response.warnings.length > 0 ? "warning" : "success",
+          text: response.warnings[0] ?? "Deleted current snapshot and reloaded a fresh one.",
+        }, "Reloaded");
+        return;
+      }
+      await deleteSnapshot(snapshotId);
+      await refreshSnapshotList();
+      updateStatus({ tone: "success", text: "Deleted saved snapshot." }, "Snapshot deleted");
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
@@ -408,13 +624,23 @@ export default function App() {
       return;
     }
     setBusy(true);
-    setStatus({ tone: "neutral", text: "Installing snapshot dependencies..." });
+    setLoading({
+      detail: "Installing dependencies inside the internal snapshot.",
+      progress: 32,
+    });
+    updateStatus({ tone: "neutral", text: "Installing snapshot dependencies..." }, "Installing");
+    await waitForPaint();
     try {
       await installDependencies(snapshot.id);
-      setStatus({ tone: "success", text: "Dependencies installed in the internal snapshot." });
+      setLoading({
+        detail: "Dependency install completed.",
+        progress: 90,
+      });
+      updateStatus({ tone: "success", text: "Dependencies installed in the internal snapshot." }, "Installed");
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
+      setLoading(null);
       setBusy(false);
     }
   }
@@ -425,16 +651,26 @@ export default function App() {
     }
     setBusy(true);
     setPreviewStarting(true);
-    setStatus({ tone: "neutral", text: "Preparing snapshot dependencies and starting preview..." });
+    setLoading({
+      detail: "Preparing dependencies and starting the preview server.",
+      progress: 28,
+    });
+    updateStatus({ tone: "neutral", text: "Preparing snapshot dependencies and starting preview..." }, "Starting preview");
+    await waitForPaint();
     try {
       const nextPreview = await startPreview(snapshot.id);
+      setLoading({
+        detail: "Connecting to the preview server.",
+        progress: 88,
+      });
       setPreview(nextPreview);
       setPreviewStarting(false);
-      setStatus({ tone: "success", text: `Preview running on ${nextPreview.url}` });
+      updateStatus({ tone: "success", text: `Preview running on ${nextPreview.url}` }, "Preview started");
     } catch (error) {
       setPreviewStarting(false);
       setStatus({ tone: "error", text: String(error) });
     } finally {
+      setLoading(null);
       setBusy(false);
     }
   }
@@ -443,10 +679,23 @@ export default function App() {
     if (!snapshot) {
       return;
     }
+    setBusy(true);
     setPreviewStarting(false);
-    await stopPreview(snapshot.id);
-    setPreview(null);
-    setStatus({ tone: "neutral", text: "Preview stopped." });
+    setLoading({
+      detail: "Stopping the preview server.",
+      progress: 45,
+    });
+    await waitForPaint();
+    try {
+      await stopPreview(snapshot.id);
+      setPreview(null);
+      updateStatus({ tone: "neutral", text: "Preview stopped." }, "Preview stopped");
+    } catch (error) {
+      setStatus({ tone: "error", text: String(error) });
+    } finally {
+      setLoading(null);
+      setBusy(false);
+    }
   }
 
   async function handleApplyStyle() {
@@ -564,6 +813,11 @@ export default function App() {
       return;
     }
     setBusy(true);
+    setLoading({
+      detail: "Applying style changes to the internal snapshot.",
+      progress: 42,
+    });
+    await waitForPaint();
     try {
       if (mode === "css") {
         const className = getClassTarget(selectedFile.content, selectedNode.id);
@@ -581,7 +835,7 @@ export default function App() {
           await writeSnapshotFile(snapshot.id, changed.path, changed.content);
           await reanalyzeAndPersist(snapshot.id, result.files);
           appendEdit("style_update", selectedNode.id, { mode, updates }, [changed.path]);
-          setStatus({ tone: "success", text: `Updated ${changed.path}` });
+          updateStatus({ tone: "success", text: `Updated ${changed.path}` }, "Updated");
         }
         return;
       }
@@ -594,10 +848,11 @@ export default function App() {
       await writeSnapshotFile(snapshot.id, selectedFile.path, nextContent);
       await reanalyzeAndPersist(snapshot.id, nextFiles);
       appendEdit("style_update", selectedNode.id, { mode, updates }, [selectedFile.path]);
-      setStatus({ tone: "success", text: `Updated ${selectedFile.path}` });
+      updateStatus({ tone: "success", text: `Updated ${selectedFile.path}` }, "Updated");
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
+      setLoading(null);
       setBusy(false);
     }
   }
@@ -611,6 +866,11 @@ export default function App() {
       return;
     }
     setBusy(true);
+    setLoading({
+      detail: "Applying structure changes to the internal snapshot.",
+      progress: 42,
+    });
+    await waitForPaint();
     try {
       const payload: Record<string, string> =
         operation === "wrap" ? { className: "dev-design-wrapper" } : {};
@@ -619,10 +879,11 @@ export default function App() {
       await writeSnapshotFile(snapshot.id, selectedFile.path, nextContent);
       await reanalyzeAndPersist(snapshot.id, nextFiles);
       appendEdit(operationToEditType(operation), selectedNode.id, { operation, payload }, [selectedFile.path]);
-      setStatus({ tone: "success", text: `${operation.replace("_", " ")} applied.` });
+      updateStatus({ tone: "success", text: `${operation.replace("_", " ")} applied.` }, "Updated");
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
+      setLoading(null);
       setBusy(false);
     }
   }
@@ -636,15 +897,21 @@ export default function App() {
       return;
     }
     setBusy(true);
+    setLoading({
+      detail: "Saving code changes to the internal snapshot.",
+      progress: 42,
+    });
+    await waitForPaint();
     try {
       const nextFiles = replaceFile(sourceFiles, selectedFile.path, codeDraft);
       await writeSnapshotFile(snapshot.id, selectedFile.path, codeDraft);
       await reanalyzeAndPersist(snapshot.id, nextFiles);
       appendEdit("code_edit", selectedNode?.id ?? `file:${selectedFile.path}`, {}, [selectedFile.path]);
-      setStatus({ tone: "success", text: `Saved snapshot edit for ${selectedFile.path}` });
+      updateStatus({ tone: "success", text: `Saved snapshot edit for ${selectedFile.path}` }, "Saved");
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
+      setLoading(null);
       setBusy(false);
     }
   }
@@ -654,7 +921,7 @@ export default function App() {
       return;
     }
     setCodeDraft(selectedFile.content);
-    setStatus({ tone: "neutral", text: `Discarded unsaved edits for ${selectedFile.path}` });
+    updateStatus({ tone: "neutral", text: `Discarded unsaved edits for ${selectedFile.path}` }, "Draft discarded");
   }
 
   async function handleCreateSyncPlan() {
@@ -666,17 +933,28 @@ export default function App() {
       return;
     }
     setBusy(true);
+    setLoading({
+      detail: "Scanning snapshot changes for sync review.",
+      progress: 35,
+    });
+    updateStatus({ tone: "neutral", text: "Preparing sync review..." }, "Scanning");
+    await waitForPaint();
     try {
       const plan = await createSyncPlan(snapshot.id);
+      setLoading({
+        detail: "Preparing changed file list and diffs.",
+        progress: 82,
+      });
       setSyncPlan(plan);
       setSelectedSyncFiles(new Set(plan.changedFiles.filter((file) => file.canApply).map((file) => file.path)));
-      setStatus({
+      updateStatus({
         tone: plan.changedFiles.length > 0 ? "warning" : "neutral",
         text: `${plan.changedFiles.length} changed file(s) ready for review.`,
-      });
+      }, "Scanned");
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
+      setLoading(null);
       setBusy(false);
     }
   }
@@ -696,16 +974,26 @@ export default function App() {
       return;
     }
     setBusy(true);
+    setLoading({
+      detail: `Applying ${files.length} selected file(s) to the original project.`,
+      progress: 35,
+    });
+    await waitForPaint();
     try {
       const response = await applySync(snapshot.id, files);
-      setStatus({
+      setLoading({
+        detail: "Sync apply completed.",
+        progress: 92,
+      });
+      updateStatus({
         tone: "success",
         text: `Applied ${response.appliedFiles.length} file(s). Backup: ${response.backupRoot}`,
-      });
+      }, "Synced");
       setSyncPlan(null);
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
+      setLoading(null);
       setBusy(false);
     }
   }
@@ -715,16 +1003,26 @@ export default function App() {
       return;
     }
     setBusy(true);
+    setLoading({
+      detail: `Refreshing ${files.length} file(s) from the original project.`,
+      progress: 35,
+    });
+    await waitForPaint();
     try {
       const refreshedFiles = await refreshFromOriginal(snapshot.id, files);
+      setLoading({
+        detail: "Reanalyzing refreshed files and rebuilding sync review.",
+        progress: 72,
+      });
       await reanalyzeAndPersist(snapshot.id, refreshedFiles);
       const plan = await createSyncPlan(snapshot.id);
       setSyncPlan(plan);
       setSelectedSyncFiles(new Set(plan.changedFiles.filter((file) => file.canApply).map((file) => file.path)));
-      setStatus({ tone: "success", text: `Refreshed ${files.length} file(s) from the original project.` });
+      updateStatus({ tone: "success", text: `Refreshed ${files.length} file(s) from the original project.` }, "Refreshed");
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
+      setLoading(null);
       setBusy(false);
     }
   }
@@ -740,8 +1038,17 @@ export default function App() {
       return;
     }
     setBusy(true);
+    setLoading({
+      detail: `Discarding snapshot changes for ${files.length} file(s).`,
+      progress: 35,
+    });
+    await waitForPaint();
     try {
       const refreshedFiles = await discardSnapshotChanges(snapshot.id, files);
+      setLoading({
+        detail: "Reanalyzing restored files.",
+        progress: 70,
+      });
       await reanalyzeAndPersist(snapshot.id, refreshedFiles);
       const selectedFileStillExists =
         selectedFile === null || refreshedFiles.some((file) => file.path === selectedFile.path);
@@ -750,14 +1057,19 @@ export default function App() {
         setSelectedElementMetrics(null);
       }
       if (syncPlan) {
+        setLoading({
+          detail: "Rebuilding sync review after discarding changes.",
+          progress: 84,
+        });
         const plan = await createSyncPlan(snapshot.id);
         setSyncPlan(plan);
         setSelectedSyncFiles(new Set(plan.changedFiles.filter((file) => file.canApply).map((file) => file.path)));
       }
-      setStatus({ tone: "success", text: `Discarded snapshot changes for ${files.length} file(s).` });
+      updateStatus({ tone: "success", text: `Discarded snapshot changes for ${files.length} file(s).` }, "Discarded");
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
     } finally {
+      setLoading(null);
       setBusy(false);
     }
   }
@@ -788,11 +1100,18 @@ export default function App() {
           <div className="brand-copy">
             <h1>Dev Design</h1>
             <p>{snapshot ? `${snapshot.frameworkGuess} snapshot` : "Local React UI editor"}</p>
+            <small>{activityLabel}</small>
           </div>
         </div>
         <div className="topbar-actions">
           <button onClick={handleOpenProject} disabled={busy}>
             Open Project
+          </button>
+          <button onClick={handleReloadSnapshot} disabled={!snapshot || busy}>
+            Reload Snapshot
+          </button>
+          <button onClick={handleOpenSnapshotsPanel} disabled={busy}>
+            Snapshots
           </button>
           <button onClick={handleInstallDependencies} disabled={!snapshot || busy}>
             Install
@@ -931,25 +1250,55 @@ export default function App() {
           onContextMenu={(event) => openPanelMenu(event, "inspector")}
         >
           <div className="panel-header">
-            <h2>{isInspectorCollapsed ? "T" : "Tools"}</h2>
+            <h2>{isInspectorCollapsed ? "T" : inspectorMode === "snapshots" ? "Snapshots" : "Tools"}</h2>
             <div className="sidebar-header-actions">
-              {!isInspectorCollapsed && <span>{selectedNode?.type ?? "none"}</span>}
+              {!isInspectorCollapsed && (
+                <span>{inspectorMode === "snapshots" ? snapshotList.length : selectedNode?.type ?? "none"}</span>
+              )}
             </div>
           </div>
           {!isInspectorCollapsed && (
             <>
               <div className="tool-palette">
                 <button
+                  className={`tool-button ${inspectorMode === "tools" ? "active" : ""}`}
+                  onClick={() => setInspectorMode("tools")}
+                  title="Tools"
+                  aria-label="Tools"
+                >
+                  T
+                </button>
+                <button
                   className={`tool-button ${selectionToolActive ? "active" : ""}`}
-                  onClick={toggleSelectionTool}
+                  onClick={() => {
+                    setInspectorMode("tools");
+                    toggleSelectionTool();
+                  }}
                   aria-pressed={selectionToolActive}
                   title="Select preview element"
                   aria-label="Select preview element"
                 >
                   <CursorIcon />
                 </button>
+                <button
+                  className={`tool-button ${inspectorMode === "snapshots" ? "active" : ""}`}
+                  onClick={handleOpenSnapshotsPanel}
+                  title="Saved snapshots"
+                  aria-label="Saved snapshots"
+                >
+                  S
+                </button>
               </div>
-              {selectedNode ? (
+              {inspectorMode === "snapshots" ? (
+                <SnapshotPanel
+                  snapshots={snapshotList}
+                  currentSnapshotId={snapshot?.id ?? null}
+                  busy={busy}
+                  onRefresh={handleOpenSnapshotsPanel}
+                  onCheckout={handleCheckoutSnapshot}
+                  onDelete={handleDeleteSnapshot}
+                />
+              ) : selectedNode ? (
               <>
                 <div className="selected-card">
                   <div className="selected-card-heading">
@@ -1468,6 +1817,28 @@ function ResetIcon() {
   );
 }
 
+function CheckoutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 12h12" />
+      <path d="m13 8 4 4-4 4" />
+      <path d="M19 5v14" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h16" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M6 7l1 14h10l1-14" />
+      <path d="M9 7V4h6v3" />
+    </svg>
+  );
+}
+
 function CursorIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1537,6 +1908,74 @@ function TreeNode({
   );
 }
 
+function SnapshotPanel({
+  snapshots,
+  currentSnapshotId,
+  busy,
+  onRefresh,
+  onCheckout,
+  onDelete,
+}: {
+  snapshots: ProjectSnapshot[];
+  currentSnapshotId: string | null;
+  busy: boolean;
+  onRefresh: () => void;
+  onCheckout: (snapshotId: string) => void;
+  onDelete: (snapshotId: string) => void;
+}) {
+  return (
+    <div className="snapshot-panel">
+      <div className="snapshot-panel-actions">
+        <button onClick={onRefresh} disabled={busy}>
+          Refresh
+        </button>
+      </div>
+      <div className="snapshot-list">
+        {snapshots.length === 0 ? (
+          <div className="empty-state compact">
+            <h2>No snapshots</h2>
+            <p>Open or reload a project to create saved snapshots.</p>
+          </div>
+        ) : (
+          snapshots.map((item) => {
+            const isCurrent = item.id === currentSnapshotId;
+            return (
+              <article className={`snapshot-item ${isCurrent ? "current" : ""}`} key={item.id}>
+                <div className="snapshot-main">
+                  <strong>{formatSnapshotDate(item.createdAt)}</strong>
+                  <span>{item.frameworkGuess}</span>
+                  {isCurrent && <span className="badge snapshot">Current</span>}
+                </div>
+                <small>{item.originalPath}</small>
+                <div className="snapshot-item-actions">
+                  <button
+                    className="icon-button"
+                    onClick={() => onCheckout(item.id)}
+                    disabled={busy || isCurrent}
+                    title="Checkout snapshot"
+                    aria-label="Checkout snapshot"
+                  >
+                    <CheckoutIcon />
+                  </button>
+                  <button
+                    className="icon-button danger"
+                    onClick={() => onDelete(item.id)}
+                    disabled={busy}
+                    title={isCurrent ? "Delete current snapshot and reload" : "Delete snapshot"}
+                    aria-label={isCurrent ? "Delete current snapshot and reload" : "Delete snapshot"}
+                  >
+                    <TrashIcon />
+                  </button>
+                </div>
+              </article>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SyncReview({
   plan,
   selectedFiles,
@@ -1562,6 +2001,15 @@ function SyncReview({
       setActiveFile(plan.changedFiles[0] ?? null);
     }
   }, [activeFile, plan.changedFiles]);
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
   const selectedChangedFiles = plan.changedFiles.filter((file) => selectedFiles.has(file.path));
   const hasUnsafeSelection = selectedChangedFiles.some((file) => !file.canApply);
   const refreshableFiles = selectedChangedFiles
@@ -1574,10 +2022,13 @@ function SyncReview({
     (file) => file.originalChangedSinceOpen && file.snapshotChangedSinceOpen,
   );
   return (
-    <div className="modal-backdrop">
-      <section className="sync-modal">
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section className="sync-modal" onMouseDown={(event) => event.stopPropagation()}>
         <div className="panel-header">
           <h2>Sync Review</h2>
+          <button className="sync-title-close" onClick={onClose}>
+            Close
+          </button>
           <div className="modal-header-actions">
             <button onClick={() => onDiscard(discardableFiles)} disabled={busy || discardableFiles.length === 0}>
               Discard Snapshot Changes
@@ -1590,6 +2041,20 @@ function SyncReview({
             <p key={warning}>{warning}</p>
           ))}
           {hasConflicts && <p>Conflict files are blocked from direct apply because both sides changed.</p>}
+        </div>
+        <div className="sync-quick-actions">
+          <button onClick={onClose}>Close</button>
+          <button
+            className="danger"
+            onClick={() => onDiscard(discardableFiles)}
+            disabled={busy || discardableFiles.length === 0}
+          >
+            Discard Selected
+          </button>
+          <span className="sync-quick-summary">
+            <strong>{discardableFiles.length}</strong>
+            <span> selected snapshot change(s) can be discarded.</span>
+          </span>
         </div>
         <div className="sync-content">
           <div className="sync-files">
@@ -1671,6 +2136,28 @@ function formatMetricInput(value: number) {
 
 function formatMetricDisplay(value: number) {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function formatActivityTime(date: Date) {
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function formatSnapshotDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function parseCssNumber(value: string) {

@@ -19,6 +19,22 @@ export function loadRecentSnapshot(): Promise<OpenProjectResponse | null> {
   return invoke<OpenProjectResponse | null>("load_recent_snapshot");
 }
 
+export function reloadSnapshot(snapshotId: string): Promise<OpenProjectResponse> {
+  return invoke<OpenProjectResponse>("reload_snapshot", { snapshotId });
+}
+
+export function listSnapshots(): Promise<OpenProjectResponse["snapshot"][]> {
+  return invoke<OpenProjectResponse["snapshot"][]>("list_snapshots");
+}
+
+export function checkoutSnapshot(snapshotId: string): Promise<OpenProjectResponse> {
+  return invoke<OpenProjectResponse>("checkout_snapshot", { snapshotId });
+}
+
+export function deleteSnapshot(snapshotId: string): Promise<void> {
+  return invoke<void>("delete_snapshot", { snapshotId });
+}
+
 export function listSnapshotFiles(snapshotId: string): Promise<SourceFile[]> {
   return invoke<SourceFile[]>("list_snapshot_files", { snapshotId });
 }
