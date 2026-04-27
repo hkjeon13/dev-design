@@ -64,7 +64,6 @@ const STYLE_PROPERTIES = [
   "visibility",
 ];
 
-const COLOR_PRESETS = ["#ef4444", "#f97316", "#facc15", "#22c55e", "#14b8a6", "#3b82f6", "#8b5cf6", "#111827", "#ffffff"];
 const OPACITY_PRESETS = ["25%", "55%", "75%", "100%"];
 const SHADOW_PRESETS = [
   { label: "None", value: "none" },
@@ -142,6 +141,15 @@ interface PanelContextMenuState {
   y: number;
 }
 
+interface PendingInlineStylePersist {
+  snapshotId: string;
+  nodeId: string;
+  filePath: string;
+  baseContent: string;
+  files: SourceFile[];
+  updates: StyleUpdate[];
+}
+
 export default function App() {
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [sourceFiles, setSourceFiles] = useState<SourceFile[]>([]);
@@ -159,7 +167,6 @@ export default function App() {
   const [codeDraft, setCodeDraft] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("preview");
   const [selectionToolActive, setSelectionToolActive] = useState(false);
-  const [openColorPalette, setOpenColorPalette] = useState<"color" | "background-color" | "stroke" | null>(null);
   const [selectedTextColor, setSelectedTextColor] = useState("#111827");
   const [selectedBackgroundColor, setSelectedBackgroundColor] = useState("#ffffff");
   const [toolX, setToolX] = useState("0");
@@ -189,6 +196,9 @@ export default function App() {
   const didRestoreRecent = useRef(false);
   const baselineTaskId = useRef(0);
   const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const stylePersistTimer = useRef<number | null>(null);
+  const pendingInlineStylePersist = useRef<PendingInlineStylePersist | null>(null);
+  const latestSnapshotContent = useRef<Map<string, string>>(new Map());
 
   const nodeMap = useMemo(() => new Map((analysis?.nodes ?? []).map((node) => [node.id, node])), [analysis]);
   const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) ?? null : null;
@@ -216,6 +226,10 @@ export default function App() {
       setCodeDraft("");
     }
   }, [selectedFile?.path, selectedFile?.content]);
+
+  useEffect(() => {
+    latestSnapshotContent.current = new Map(sourceFiles.map((file) => [file.path, file.content]));
+  }, [sourceFiles]);
 
   useEffect(() => {
     if (didRestoreRecent.current) {
@@ -369,6 +383,20 @@ export default function App() {
       {
         type: "dev-design-selection-mode",
         enabled: selectionToolActive,
+      },
+      "*",
+    );
+  }
+
+  function applyPreviewStyleUpdates(updates: StyleUpdate[], nodeId = selectedNode?.id) {
+    if (!nodeId) {
+      return;
+    }
+    previewFrameRef.current?.contentWindow?.postMessage(
+      {
+        type: "dev-design-apply-style",
+        id: nodeId,
+        styles: Object.fromEntries(updates.map((update) => [update.property, update.value])),
       },
       "*",
     );
@@ -816,6 +844,28 @@ export default function App() {
     };
   }
 
+  function numericInputKeys(
+    value: string,
+    setValue: (value: string) => void,
+    commit: (value: string) => void | Promise<void>,
+    options: { min?: number } = {},
+  ) {
+    return (event: ReactKeyboardEvent<HTMLInputElement>) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+        commitOnEnter()(event);
+        return;
+      }
+      event.preventDefault();
+      const current = parseCssNumber(value) ?? 0;
+      const delta = event.key === "ArrowUp" ? 1 : -1;
+      const step = event.shiftKey ? 10 : 1;
+      const nextNumber = Math.max(options.min ?? Number.NEGATIVE_INFINITY, current + delta * step);
+      const nextValue = formatMetricInput(roundMetric(nextNumber));
+      setValue(nextValue);
+      void commit(nextValue);
+    };
+  }
+
   async function handleQuickStyle(property: string, value: string) {
     setStyleProperty(property);
     setStyleValue(value);
@@ -914,7 +964,6 @@ export default function App() {
     } else {
       setSelectedBackgroundColor(value);
     }
-    setOpenColorPalette(null);
     await handleQuickStyle(property, value);
   }
 
@@ -933,6 +982,53 @@ export default function App() {
     void handleStrokeChange(value, strokeWeight);
   }
 
+  function scheduleInlineStylePersist(request: PendingInlineStylePersist) {
+    const pending = pendingInlineStylePersist.current;
+    if (
+      pending &&
+      pending.snapshotId === request.snapshotId &&
+      pending.nodeId === request.nodeId &&
+      pending.filePath === request.filePath
+    ) {
+      pending.updates = mergeStyleUpdates(pending.updates, request.updates);
+    } else {
+      pendingInlineStylePersist.current = request;
+    }
+
+    if (stylePersistTimer.current !== null) {
+      window.clearTimeout(stylePersistTimer.current);
+    }
+    stylePersistTimer.current = window.setTimeout(() => {
+      const next = pendingInlineStylePersist.current;
+      pendingInlineStylePersist.current = null;
+      stylePersistTimer.current = null;
+      if (next) {
+        void persistInlineStyleUpdates(next);
+      }
+    }, 240);
+  }
+
+  async function persistInlineStyleUpdates(request: PendingInlineStylePersist) {
+    try {
+      const nextContent = applyInlineStyleUpdate(request.baseContent, request.nodeId, request.updates);
+      if (nextContent === request.baseContent) {
+        setStatus({
+          tone: "warning",
+          text: "The selected preview element could not be matched in the source file. Select it again and retry.",
+        });
+        return;
+      }
+      const nextFiles = replaceFile(request.files, request.filePath, nextContent);
+      latestSnapshotContent.current.set(request.filePath, nextContent);
+      await writeSnapshotFile(request.snapshotId, request.filePath, nextContent);
+      await reanalyzeAndPersist(request.snapshotId, nextFiles);
+      appendEdit("style_update", request.nodeId, { mode: "inline", updates: request.updates }, [request.filePath]);
+      updateStatus({ tone: "success", text: `Updated ${request.filePath}` }, "Updated");
+    } catch (error) {
+      setStatus({ tone: "error", text: String(error) });
+    }
+  }
+
   async function applyStyleUpdates(updates: StyleUpdate[], mode: StyleMode = styleMode) {
     if (baselineRecording) {
       setStatus({ tone: "warning", text: "Snapshot baseline is still being prepared. Try again shortly." });
@@ -941,12 +1037,18 @@ export default function App() {
     if (!snapshot || !selectedNode || !selectedFile || selectedNode.type !== "jsx_element") {
       return;
     }
-    setBusy(true);
-    setLoading({
-      detail: "Applying style changes to the internal snapshot.",
-      progress: 42,
-    });
-    await waitForPaint();
+    applyPreviewStyleUpdates(updates, selectedNode.id);
+    if (mode === "inline") {
+      scheduleInlineStylePersist({
+        snapshotId: snapshot.id,
+        nodeId: selectedNode.id,
+        filePath: selectedFile.path,
+        baseContent: latestSnapshotContent.current.get(selectedFile.path) ?? selectedFile.content,
+        files: sourceFiles,
+        updates,
+      });
+      return;
+    }
     try {
       if (mode === "css") {
         const className = getClassTarget(selectedFile.content, selectedNode.id);
@@ -987,9 +1089,6 @@ export default function App() {
       updateStatus({ tone: "success", text: `Updated ${selectedFile.path}` }, "Updated");
     } catch (error) {
       setStatus({ tone: "error", text: String(error) });
-    } finally {
-      setLoading(null);
-      setBusy(false);
     }
   }
 
@@ -1259,6 +1358,15 @@ export default function App() {
           <button onClick={handleInstallDependencies} disabled={!snapshot || busy}>
             Install
           </button>
+          <button
+            className="icon-button"
+            onClick={() => selectedFile && handleDiscardSnapshotChanges([selectedFile.path])}
+            disabled={!selectedFile || snapshotEditingDisabled}
+            title="Reset selected file from original"
+            aria-label="Reset selected file from original"
+          >
+            <ResetIcon />
+          </button>
           {previewControlActive ? (
             <button
               className="icon-button"
@@ -1456,37 +1564,22 @@ export default function App() {
               </div>
               {selectedNode ? (
               <>
-                <div className="selected-card">
-                  <div className="selected-card-heading">
-                    <strong>{selectedNode.displayName}</strong>
-                    <button
-                      className="icon-button"
-                      onClick={() => selectedFile && handleDiscardSnapshotChanges([selectedFile.path])}
-                      disabled={!selectedFile || snapshotEditingDisabled}
-                      title="Reset selected file from original"
-                      aria-label="Reset selected file from original"
-                    >
-                      <ResetIcon />
-                    </button>
+                {(selectedElementMetrics?.nodeId === selectedNode.id || baselineRecording || !selectedNodeCanEdit) && (
+                  <div className="selection-summary">
+                    {selectedElementMetrics?.nodeId === selectedNode.id && (
+                      <div className="element-metrics" aria-label="Selected element size">
+                        <span>W {formatMetricDisplay(selectedElementMetrics.width)}px</span>
+                        <span>H {formatMetricDisplay(selectedElementMetrics.height)}px</span>
+                      </div>
+                    )}
+                    {baselineRecording && (
+                      <small className="tool-note">Preparing snapshot baseline. Editing will unlock shortly.</small>
+                    )}
+                    {!selectedNodeCanEdit && (
+                      <small className="tool-note">Select a JSX element in the preview to edit styles.</small>
+                    )}
                   </div>
-                  <div className="selected-card-meta">
-                    <span className="badge">{selectedNode.type}</span>
-                    <span>{selectedNode.sourceFile}</span>
-                    <small>{selectedNode.sourceRange.start}-{selectedNode.sourceRange.end}</small>
-                  </div>
-                  {selectedElementMetrics?.nodeId === selectedNode.id && (
-                    <div className="element-metrics" aria-label="Selected element size">
-                      <span>W {formatMetricDisplay(selectedElementMetrics.width)}px</span>
-                      <span>H {formatMetricDisplay(selectedElementMetrics.height)}px</span>
-                    </div>
-                  )}
-                  {baselineRecording && (
-                    <small className="tool-note">Preparing snapshot baseline. Editing will unlock shortly.</small>
-                  )}
-                  {!selectedNodeCanEdit && (
-                    <small className="tool-note">Select a JSX element in the preview to edit styles.</small>
-                  )}
-                </div>
+                )}
 
                 <div className="control-group">
                   <div className="control-heading">
@@ -1512,15 +1605,16 @@ export default function App() {
                       </button>
                     ))}
                   </div>
-                  <span className="field-caption">Position</span>
-                  <div className="two-col">
+                  <div className="field-row">
+                    <span className="field-caption">Position</span>
+                    <div className="two-col">
                     <label>
                       X
                       <input
                         value={toolX}
                         onChange={(event) => setToolX(event.target.value)}
                         onBlur={() => handleTransformChange()}
-                        onKeyDown={commitOnEnter()}
+                        onKeyDown={numericInputKeys(toolX, setToolX, (value) => handleTransformChange(value, toolY, toolRotation))}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
@@ -1530,19 +1624,19 @@ export default function App() {
                         value={toolY}
                         onChange={(event) => setToolY(event.target.value)}
                         onBlur={() => handleTransformChange()}
-                        onKeyDown={commitOnEnter()}
+                        onKeyDown={numericInputKeys(toolY, setToolY, (value) => handleTransformChange(toolX, value, toolRotation))}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
+                    </div>
                   </div>
-                  <span className="field-caption">Rotation</span>
                   <label>
                     Rotation
                     <input
                       value={toolRotation}
                       onChange={(event) => setToolRotation(event.target.value)}
                       onBlur={() => handleTransformChange()}
-                      onKeyDown={commitOnEnter()}
+                      onKeyDown={numericInputKeys(toolRotation, setToolRotation, (value) => handleTransformChange(toolX, toolY, value))}
                       disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                     />
                   </label>
@@ -1552,15 +1646,16 @@ export default function App() {
                   <div className="control-heading">
                     <h3>Layout</h3>
                   </div>
-                  <span className="field-caption">Dimensions</span>
-                  <div className="two-col">
+                  <div className="field-row">
+                    <span className="field-caption">Dimensions</span>
+                    <div className="two-col">
                     <label>
                       W
                       <input
                         value={toolWidth}
                         onChange={(event) => setToolWidth(event.target.value)}
                         onBlur={() => handleDimensionsChange()}
-                        onKeyDown={commitOnEnter()}
+                        onKeyDown={numericInputKeys(toolWidth, setToolWidth, (value) => handleDimensionsChange(value, toolHeight), { min: 0 })}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
@@ -1570,13 +1665,15 @@ export default function App() {
                         value={toolHeight}
                         onChange={(event) => setToolHeight(event.target.value)}
                         onBlur={() => handleDimensionsChange()}
-                        onKeyDown={commitOnEnter()}
+                        onKeyDown={numericInputKeys(toolHeight, setToolHeight, (value) => handleDimensionsChange(toolWidth, value), { min: 0 })}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
+                    </div>
                   </div>
-                  <span className="field-caption">Spacing</span>
-                  <div className="two-col">
+                  <div className="field-row">
+                    <span className="field-caption">Spacing</span>
+                    <div className="two-col">
                     <label>
                       Padding
                       <input
@@ -1597,6 +1694,7 @@ export default function App() {
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
+                    </div>
                   </div>
                 </div>
 
@@ -1635,23 +1733,7 @@ export default function App() {
                       value={selectedTextColor}
                       disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       onChange={handleTextColorInput}
-                      onTogglePalette={() => setOpenColorPalette((current) => (current === "color" ? null : "color"))}
                     />
-                    {openColorPalette === "color" && (
-                      <div className="color-map">
-                        {COLOR_PRESETS.map((value) => (
-                          <button
-                            key={`text-${value}`}
-                            className="color-swatch"
-                            style={{ background: value }}
-                            onClick={() => handleColorStyle("color", value)}
-                            disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
-                            title={`Text ${value}`}
-                            aria-label={`Text ${value}`}
-                          />
-                        ))}
-                      </div>
-                    )}
                   </div>
                 </div>
 
@@ -1699,27 +1781,7 @@ export default function App() {
                       value={selectedBackgroundColor}
                       disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       onChange={handleFillColorInput}
-                      onTogglePalette={() =>
-                        setOpenColorPalette((current) =>
-                          current === "background-color" ? null : "background-color",
-                        )
-                      }
                     />
-                    {openColorPalette === "background-color" && (
-                      <div className="color-map">
-                        {COLOR_PRESETS.map((value) => (
-                          <button
-                            key={`fill-${value}`}
-                            className="color-swatch"
-                            style={{ background: value }}
-                            onClick={() => handleColorStyle("background-color", value)}
-                            disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
-                            title={`Fill ${value}`}
-                            aria-label={`Fill ${value}`}
-                          />
-                        ))}
-                      </div>
-                    )}
                   </div>
                 </div>
 
@@ -1732,23 +1794,7 @@ export default function App() {
                       value={strokeColor}
                       disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       onChange={handleStrokeColorInput}
-                      onTogglePalette={() => setOpenColorPalette((current) => (current === "stroke" ? null : "stroke"))}
                     />
-                    {openColorPalette === "stroke" && (
-                      <div className="color-map">
-                        {COLOR_PRESETS.map((value) => (
-                          <button
-                            key={`stroke-${value}`}
-                            className="color-swatch"
-                            style={{ background: value }}
-                            onClick={() => handleStrokeChange(value, strokeWeight)}
-                            disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
-                            title={`Stroke ${value}`}
-                            aria-label={`Stroke ${value}`}
-                          />
-                        ))}
-                      </div>
-                    )}
                   </div>
                   <label>
                     Weight
@@ -1925,17 +1971,21 @@ function ColorField({
   value,
   disabled,
   onChange,
-  onTogglePalette,
 }: {
   value: string;
   disabled: boolean;
   onChange: (value: string) => void;
-  onTogglePalette: () => void;
 }) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const inputValue = value.startsWith("#") && /^#[0-9a-fA-F]{6}$/.test(value) ? value : "#ffffff";
+  function openColorPicker() {
+    inputRef.current?.click();
+  }
+
   return (
     <div className="color-field">
       <input
+        ref={inputRef}
         type="color"
         value={inputValue}
         onChange={(event) => onChange(event.target.value)}
@@ -1945,10 +1995,10 @@ function ColorField({
       <button
         type="button"
         className="color-value-button"
-        onClick={onTogglePalette}
+        onClick={openColorPicker}
         disabled={disabled}
-        title="Show color presets"
-        aria-label="Show color presets"
+        title="Pick color"
+        aria-label="Pick color"
       >
         <span>{value}</span>
       </button>
@@ -2078,23 +2128,36 @@ function AlignmentIcon({
   axis: "horizontal" | "vertical";
   position: "start" | "center" | "end";
 }) {
-  const marker = position === "start" ? 7 : position === "center" ? 12 : 17;
   if (axis === "horizontal") {
+    const guideX = position === "start" ? 6 : position === "center" ? 12 : 18;
+    const bars =
+      position === "start"
+        ? ["M10 8.5H18", "M10 15.5H15"]
+        : position === "center"
+          ? ["M6 8.5H18", "M8.5 15.5H15.5"]
+          : ["M6 8.5H14", "M9 15.5H14"];
     return (
       <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M5 5v14" />
-        <path d="M9 8h10" />
-        <path d="M9 16h7" />
-        <circle cx={marker} cy="12" r="1.7" />
+        <path d={`M${guideX} 5.5V18.5`} />
+        {bars.map((path) => (
+          <path key={path} d={path} />
+        ))}
       </svg>
     );
   }
+  const guideY = position === "start" ? 6 : position === "center" ? 12 : 18;
+  const bars =
+    position === "start"
+      ? ["M8.5 10V18", "M15.5 10V15"]
+      : position === "center"
+        ? ["M8.5 6V18", "M15.5 8.5V15.5"]
+        : ["M8.5 6V14", "M15.5 9V14"];
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M5 5h14" />
-      <path d="M8 9v10" />
-      <path d="M16 9v7" />
-      <circle cx="12" cy={marker} r="1.7" />
+      <path d={`M5.5 ${guideY}H18.5`} />
+      {bars.map((path) => (
+        <path key={path} d={path} />
+      ))}
     </svg>
   );
 }
@@ -2406,6 +2469,14 @@ function FileBadge({ file }: { file: ChangedFile }) {
 
 function replaceFile(files: SourceFile[], path: string, content: string): SourceFile[] {
   return files.map((file) => (file.path === path ? { ...file, content } : file));
+}
+
+function mergeStyleUpdates(current: StyleUpdate[], incoming: StyleUpdate[]) {
+  const byProperty = new Map(current.map((update) => [update.property, update]));
+  for (const update of incoming) {
+    byProperty.set(update.property, update);
+  }
+  return Array.from(byProperty.values());
 }
 
 function toCssPx(value: string) {

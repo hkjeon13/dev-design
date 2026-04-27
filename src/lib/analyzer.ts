@@ -284,6 +284,45 @@ if (typeof window !== "undefined" && !Reflect.get(window, "__DEV_DESIGN_SELECTIO
       }
       getDevDesignOverlay();
       updateDevDesignOverlay();
+      return;
+    }
+    if (event.data?.type === "dev-design-apply-style" && typeof event.data.id === "string" && event.data.styles && typeof event.data.styles === "object") {
+      const selected = document.querySelector("[data-dev-design-id='" + event.data.id + "']");
+      const selectedStyle = selected ? Reflect.get(selected, "style") : null;
+      if (!selected || !selectedStyle) {
+        return;
+      }
+      Object.entries(event.data.styles).forEach(([property, value]) => {
+        if (value !== null && value !== undefined) {
+          selectedStyle.setProperty(property, String(value));
+        }
+      });
+      Reflect.set(window, "__DEV_DESIGN_SELECTED_ELEMENT__", selected);
+      getDevDesignOverlay();
+      updateDevDesignOverlay();
+      const rect = selected.getBoundingClientRect?.();
+      const style = window.getComputedStyle(selected);
+      window.parent.postMessage({
+        type: "dev-design-select",
+        id: event.data.id,
+        bounds: rect ? {
+          width: rect.width,
+          height: rect.height,
+          left: rect.left,
+          top: rect.top
+        } : null,
+        style: {
+          color: style.color,
+          backgroundColor: style.backgroundColor,
+          fontSize: style.fontSize,
+          fontWeight: style.fontWeight,
+          opacity: style.opacity,
+          borderColor: style.borderColor,
+          borderWidth: style.borderWidth,
+          borderRadius: style.borderRadius,
+          boxShadow: style.boxShadow
+        }
+      }, "*");
     }
   });
   window.addEventListener("scroll", updateDevDesignOverlay, true);
