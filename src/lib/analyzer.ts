@@ -446,37 +446,37 @@ function isDevDesignClickAttribute(attribute: t.JSXAttribute): boolean {
 function collectJsxElements(filePath: string, source: string): JsxElementRecord[] {
   const ast = parseReact(filePath, source);
   const records: JsxElementRecord[] = [];
+  const stack: JsxElementRecord[] = [];
 
   traverse(ast, {
-    JSXElement(jsxPath) {
-      const start = jsxPath.node.start ?? 0;
-      const end = jsxPath.node.end ?? start;
-      const opening = jsxPath.node.openingElement;
-      const idAttribute = getJsxAttribute(opening, "data-dev-design-id");
-      const id = idAttribute ? getStringAttributeValue(idAttribute) : makeElementId(jsxPath, filePath);
-      records.push({
-        id,
-        displayName: elementLabel(opening),
-        sourceFile: filePath,
-        start,
-        end,
-        parentId: null,
-        childrenIds: [],
-      });
+    JSXElement: {
+      enter(jsxPath) {
+        const start = jsxPath.node.start ?? 0;
+        const end = jsxPath.node.end ?? start;
+        const opening = jsxPath.node.openingElement;
+        const idAttribute = getJsxAttribute(opening, "data-dev-design-id");
+        const id = idAttribute ? getStringAttributeValue(idAttribute) : makeElementId(jsxPath, filePath);
+        const parent = stack[stack.length - 1] ?? null;
+        const record: JsxElementRecord = {
+          id,
+          displayName: elementLabel(opening),
+          sourceFile: filePath,
+          start,
+          end,
+          parentId: parent?.id ?? null,
+          childrenIds: [],
+        };
+        if (parent) {
+          parent.childrenIds.push(record.id);
+        }
+        records.push(record);
+        stack.push(record);
+      },
+      exit() {
+        stack.pop();
+      },
     },
   });
-
-  for (const record of records) {
-    record.sourceFile = filePath;
-    const parent = records
-      .filter((candidate) => candidate.id !== record.id)
-      .filter((candidate) => candidate.start <= record.start && candidate.end >= record.end)
-      .sort((a, b) => a.end - a.start - (b.end - b.start))[0];
-    if (parent) {
-      record.parentId = parent.id;
-      parent.childrenIds.push(record.id);
-    }
-  }
 
   return records;
 }

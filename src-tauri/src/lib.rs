@@ -752,10 +752,37 @@ fn copy_project_snapshot(original: &Path, snapshot: &Path) -> io::Result<()> {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(source, target)?;
+            copy_file_fast(source, &target)?;
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn copy_file_fast(source: &Path, target: &Path) -> io::Result<u64> {
+    use std::ffi::CString;
+    use std::os::raw::c_char;
+    use std::os::unix::ffi::OsStrExt;
+
+    unsafe extern "C" {
+        fn clonefile(src: *const c_char, dst: *const c_char, flags: u32) -> i32;
+    }
+
+    let source_c = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let target_c = CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
+
+    if unsafe { clonefile(source_c.as_ptr(), target_c.as_ptr(), 0) } == 0 {
+        return fs::metadata(target).map(|metadata| metadata.len());
+    }
+
+    fs::copy(source, target)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_file_fast(source: &Path, target: &Path) -> io::Result<u64> {
+    fs::copy(source, target)
 }
 
 fn should_ignore_path(path: &Path) -> bool {
