@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { analyzeSourceFiles } from "./lib/analyzer";
 import { applyCssRuleUpdate } from "./lib/cssTransforms";
 import {
@@ -122,6 +122,18 @@ interface SelectedElementMetrics {
   height: number;
 }
 
+interface SelectedElementStyle {
+  color?: string;
+  backgroundColor?: string;
+  fontSize?: string;
+  fontWeight?: string;
+  opacity?: string;
+  borderColor?: string;
+  borderWidth?: string;
+  borderRadius?: string;
+  boxShadow?: string;
+}
+
 type PanelContextTarget = "project" | "inspector";
 
 interface PanelContextMenuState {
@@ -187,7 +199,7 @@ export default function App() {
   );
   const baselineUnavailable = snapshot !== null && baselineStatus !== "ready";
   const baselineRecording = baselineStatus === "recording";
-  const snapshotEditingDisabled = busy || baselineUnavailable;
+  const snapshotEditingDisabled = busy || baselineRecording;
   const selectedNodeCanEdit = selectedNode?.type === "jsx_element";
   const previewControlActive = preview !== null || previewStarting;
   const previewLabel = preview?.url ?? (previewStarting ? "starting" : "not running");
@@ -232,12 +244,12 @@ export default function App() {
         await refreshSnapshotList();
         await waitForPaint();
         await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
-        baselineTaskId.current += 1;
-        setBaselineStatus(
-          response.warnings.some((warning) => warning.includes("Baseline manifest is missing"))
-            ? "error"
-            : "ready",
-        );
+        if (hasMissingBaselineWarning(response.warnings)) {
+          recordBaselineInBackground(response.snapshot.id);
+        } else {
+          baselineTaskId.current += 1;
+          setBaselineStatus("ready");
+        }
         setSelectedNodeId(null);
         setPreview(null);
         setPreviewStarting(false);
@@ -280,6 +292,7 @@ export default function App() {
         } else {
           setSelectedElementMetrics(null);
         }
+        syncSelectedElementStyle(event.data.style);
       }
     }
     window.addEventListener("message", handlePreviewMessage);
@@ -361,6 +374,46 @@ export default function App() {
     );
   }
 
+  function syncSelectedElementStyle(rawStyle: unknown) {
+    if (!rawStyle || typeof rawStyle !== "object") {
+      return;
+    }
+    const style = rawStyle as SelectedElementStyle;
+    const textColor = normalizeCssColor(style.color);
+    if (textColor) {
+      setSelectedTextColor(textColor);
+    }
+    const backgroundColor = normalizeCssColor(style.backgroundColor);
+    if (backgroundColor) {
+      setSelectedBackgroundColor(backgroundColor);
+    }
+    const borderColor = normalizeCssColor(style.borderColor);
+    if (borderColor) {
+      setStrokeColor(borderColor);
+    }
+    if (style.fontSize) {
+      setToolFontSize(stripPx(style.fontSize));
+    }
+    if (style.fontWeight) {
+      setToolFontWeight(normalizeFontWeight(style.fontWeight));
+    }
+    if (style.opacity) {
+      const opacity = Number.parseFloat(style.opacity);
+      if (Number.isFinite(opacity)) {
+        setToolOpacity(String(Math.round(opacity * 100)));
+      }
+    }
+    if (style.borderWidth) {
+      setStrokeWeight(stripPx(style.borderWidth));
+    }
+    if (style.borderRadius) {
+      setToolRadius(stripPx(style.borderRadius));
+    }
+    if (style.boxShadow) {
+      setShadowValue(style.boxShadow === "none" ? "none" : style.boxShadow);
+    }
+  }
+
   function updateStatus(message: StatusMessage, activityText?: string) {
     setStatus(message);
     if (activityText) {
@@ -386,6 +439,10 @@ export default function App() {
         setBaselineStatus("error");
         setStatus({ tone: "warning", text: `Baseline hashing failed: ${String(error)}` });
       });
+  }
+
+  function hasMissingBaselineWarning(warnings: string[]) {
+    return warnings.some((warning) => warning.includes("Baseline manifest is missing"));
   }
 
   async function handleOpenProject() {
@@ -547,12 +604,12 @@ export default function App() {
       await refreshSnapshotList();
       await waitForPaint();
       await reanalyzeAndPersist(response.snapshot.id, response.sourceFiles);
-      baselineTaskId.current += 1;
-      setBaselineStatus(
-        response.warnings.some((warning) => warning.includes("Baseline manifest is missing"))
-          ? "error"
-          : "ready",
-      );
+      if (hasMissingBaselineWarning(response.warnings)) {
+        recordBaselineInBackground(response.snapshot.id);
+      } else {
+        baselineTaskId.current += 1;
+        setBaselineStatus("ready");
+      }
       setSelectedNodeId(null);
       setSelectedElementMetrics(null);
       setPreview(null);
@@ -745,6 +802,20 @@ export default function App() {
     await applyStyleUpdates([{ property: styleProperty, value: styleValue }]);
   }
 
+  function commitOnEnter(action?: () => void | Promise<void>) {
+    return (event: ReactKeyboardEvent<HTMLInputElement | HTMLSelectElement>) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      if (action) {
+        void action();
+        return;
+      }
+      event.currentTarget.blur();
+    };
+  }
+
   async function handleQuickStyle(property: string, value: string) {
     setStyleProperty(property);
     setStyleValue(value);
@@ -847,8 +918,23 @@ export default function App() {
     await handleQuickStyle(property, value);
   }
 
+  function handleTextColorInput(value: string) {
+    setSelectedTextColor(value);
+    void handleColorStyle("color", value);
+  }
+
+  function handleFillColorInput(value: string) {
+    setSelectedBackgroundColor(value);
+    void handleColorStyle("background-color", value);
+  }
+
+  function handleStrokeColorInput(value: string) {
+    setStrokeColor(value);
+    void handleStrokeChange(value, strokeWeight);
+  }
+
   async function applyStyleUpdates(updates: StyleUpdate[], mode: StyleMode = styleMode) {
-    if (baselineUnavailable) {
+    if (baselineRecording) {
       setStatus({ tone: "warning", text: "Snapshot baseline is still being prepared. Try again shortly." });
       return;
     }
@@ -887,6 +973,13 @@ export default function App() {
         mode === "tailwind"
           ? applyTailwindUpdate(selectedFile.content, selectedNode.id, updates)
           : applyInlineStyleUpdate(selectedFile.content, selectedNode.id, updates);
+      if (nextContent === selectedFile.content) {
+        setStatus({
+          tone: "warning",
+          text: "The selected preview element could not be matched in the source file. Select it again and retry.",
+        });
+        return;
+      }
       const nextFiles = replaceFile(sourceFiles, selectedFile.path, nextContent);
       await writeSnapshotFile(snapshot.id, selectedFile.path, nextContent);
       await reanalyzeAndPersist(snapshot.id, nextFiles);
@@ -901,7 +994,7 @@ export default function App() {
   }
 
   async function handleStructureOperation(operation: StructureOperation) {
-    if (baselineUnavailable) {
+    if (baselineRecording) {
       setStatus({ tone: "warning", text: "Snapshot baseline is still being prepared. Try again shortly." });
       return;
     }
@@ -918,6 +1011,13 @@ export default function App() {
       const payload: Record<string, string> =
         operation === "wrap" ? { className: "dev-design-wrapper" } : {};
       const nextContent = applyStructureOperation(selectedFile.content, selectedNode.id, operation, payload);
+      if (nextContent === selectedFile.content) {
+        setStatus({
+          tone: "warning",
+          text: "The selected preview element could not be matched in the source file. Select it again and retry.",
+        });
+        return;
+      }
       const nextFiles = replaceFile(sourceFiles, selectedFile.path, nextContent);
       await writeSnapshotFile(snapshot.id, selectedFile.path, nextContent);
       await reanalyzeAndPersist(snapshot.id, nextFiles);
@@ -1293,7 +1393,31 @@ export default function App() {
           onContextMenu={(event) => openPanelMenu(event, "inspector")}
         >
           <div className="panel-header">
-            <h2>{isInspectorCollapsed ? "T" : inspectorMode === "snapshots" ? "Snapshots" : "Tools"}</h2>
+            {isInspectorCollapsed ? (
+              <h2>T</h2>
+            ) : (
+              <div className="panel-tabs" role="tablist" aria-label="Inspector panel">
+                <button
+                  className={inspectorMode === "tools" ? "active" : ""}
+                  type="button"
+                  role="tab"
+                  aria-selected={inspectorMode === "tools"}
+                  onClick={() => setInspectorMode("tools")}
+                >
+                  Tools
+                </button>
+                <button
+                  className={inspectorMode === "snapshots" ? "active" : ""}
+                  type="button"
+                  role="tab"
+                  aria-selected={inspectorMode === "snapshots"}
+                  onClick={handleOpenSnapshotsPanel}
+                  disabled={busy}
+                >
+                  Snapshots
+                </button>
+              </div>
+            )}
             <div className="sidebar-header-actions">
               {!isInspectorCollapsed && (
                 <span>{inspectorMode === "snapshots" ? snapshotList.length : selectedNode?.type ?? "none"}</span>
@@ -1302,36 +1426,6 @@ export default function App() {
           </div>
           {!isInspectorCollapsed && (
             <>
-              <div className="tool-palette">
-                <button
-                  className={`tool-button ${inspectorMode === "tools" ? "active" : ""}`}
-                  onClick={() => setInspectorMode("tools")}
-                  title="Tools"
-                  aria-label="Tools"
-                >
-                  <ToolsIcon />
-                </button>
-                <button
-                  className={`tool-button ${selectionToolActive ? "active" : ""}`}
-                  onClick={() => {
-                    setInspectorMode("tools");
-                    toggleSelectionTool();
-                  }}
-                  aria-pressed={selectionToolActive}
-                  title="Select preview element"
-                  aria-label="Select preview element"
-                >
-                  <CursorIcon />
-                </button>
-                <button
-                  className={`tool-button ${inspectorMode === "snapshots" ? "active" : ""}`}
-                  onClick={handleOpenSnapshotsPanel}
-                  title="Saved snapshots"
-                  aria-label="Saved snapshots"
-                >
-                  <SnapshotsIcon />
-                </button>
-              </div>
               {inspectorMode === "snapshots" ? (
                 <SnapshotPanel
                   snapshots={snapshotList}
@@ -1343,6 +1437,23 @@ export default function App() {
                 />
               ) : (
               <div className="tools-panel">
+              <div className="tool-palette">
+                <button
+                  className={`tool-button ${selectionToolActive ? "active" : ""}`}
+                  onClick={toggleSelectionTool}
+                  aria-pressed={selectionToolActive}
+                  title="Select preview element"
+                  aria-label="Select preview element"
+                >
+                  <CursorIcon />
+                </button>
+                <span>{selectionToolActive ? "Selection on" : "Selection off"}</span>
+              </div>
+              <div className="design-tabs" role="tablist" aria-label="Inspector mode">
+                <button className="active" type="button" role="tab" aria-selected="true">
+                  Design
+                </button>
+              </div>
               {selectedNode ? (
               <>
                 <div className="selected-card">
@@ -1369,12 +1480,19 @@ export default function App() {
                       <span>H {formatMetricDisplay(selectedElementMetrics.height)}px</span>
                     </div>
                   )}
+                  {baselineRecording && (
+                    <small className="tool-note">Preparing snapshot baseline. Editing will unlock shortly.</small>
+                  )}
+                  {!selectedNodeCanEdit && (
+                    <small className="tool-note">Select a JSX element in the preview to edit styles.</small>
+                  )}
                 </div>
 
                 <div className="control-group">
                   <div className="control-heading">
-                    <h3>Alignment</h3>
+                    <h3>Position</h3>
                   </div>
+                  <span className="field-caption">Alignment</span>
                   <div className="icon-grid six">
                     {ALIGNMENT_ACTIONS.map((action) => (
                       <button
@@ -1394,9 +1512,7 @@ export default function App() {
                       </button>
                     ))}
                   </div>
-                  <div className="control-heading">
-                    <h3>Position</h3>
-                  </div>
+                  <span className="field-caption">Position</span>
                   <div className="two-col">
                     <label>
                       X
@@ -1404,6 +1520,7 @@ export default function App() {
                         value={toolX}
                         onChange={(event) => setToolX(event.target.value)}
                         onBlur={() => handleTransformChange()}
+                        onKeyDown={commitOnEnter()}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
@@ -1413,16 +1530,19 @@ export default function App() {
                         value={toolY}
                         onChange={(event) => setToolY(event.target.value)}
                         onBlur={() => handleTransformChange()}
+                        onKeyDown={commitOnEnter()}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
                   </div>
+                  <span className="field-caption">Rotation</span>
                   <label>
                     Rotation
                     <input
                       value={toolRotation}
                       onChange={(event) => setToolRotation(event.target.value)}
                       onBlur={() => handleTransformChange()}
+                      onKeyDown={commitOnEnter()}
                       disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                     />
                   </label>
@@ -1432,6 +1552,7 @@ export default function App() {
                   <div className="control-heading">
                     <h3>Layout</h3>
                   </div>
+                  <span className="field-caption">Dimensions</span>
                   <div className="two-col">
                     <label>
                       W
@@ -1439,6 +1560,7 @@ export default function App() {
                         value={toolWidth}
                         onChange={(event) => setToolWidth(event.target.value)}
                         onBlur={() => handleDimensionsChange()}
+                        onKeyDown={commitOnEnter()}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
@@ -1448,10 +1570,12 @@ export default function App() {
                         value={toolHeight}
                         onChange={(event) => setToolHeight(event.target.value)}
                         onBlur={() => handleDimensionsChange()}
+                        onKeyDown={commitOnEnter()}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
                   </div>
+                  <span className="field-caption">Spacing</span>
                   <div className="two-col">
                     <label>
                       Padding
@@ -1459,6 +1583,7 @@ export default function App() {
                         value={toolPadding}
                         onChange={(event) => setToolPadding(event.target.value)}
                         onBlur={() => handleLayoutSpacingChange()}
+                        onKeyDown={commitOnEnter()}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
@@ -1468,6 +1593,7 @@ export default function App() {
                         value={toolGap}
                         onChange={(event) => setToolGap(event.target.value)}
                         onBlur={() => handleLayoutSpacingChange()}
+                        onKeyDown={commitOnEnter()}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
@@ -1485,6 +1611,7 @@ export default function App() {
                         value={toolFontSize}
                         onChange={(event) => setToolFontSize(event.target.value)}
                         onBlur={() => handleTypographyChange()}
+                        onKeyDown={commitOnEnter()}
                         disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                       />
                     </label>
@@ -1504,14 +1631,12 @@ export default function App() {
                     </label>
                   </div>
                   <div className="color-picker">
-                    <button
-                      className="selected-color-button"
-                      onClick={() => setOpenColorPalette((current) => (current === "color" ? null : "color"))}
+                    <ColorField
+                      value={selectedTextColor}
                       disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
-                    >
-                      <span className="selected-color-swatch" style={{ background: selectedTextColor }} />
-                      <span>{selectedTextColor}</span>
-                    </button>
+                      onChange={handleTextColorInput}
+                      onTogglePalette={() => setOpenColorPalette((current) => (current === "color" ? null : "color"))}
+                    />
                     {openColorPalette === "color" && (
                       <div className="color-map">
                         {COLOR_PRESETS.map((value) => (
@@ -1538,20 +1663,22 @@ export default function App() {
                     <label>
                       Opacity
                       <input
-                        value={toolOpacity}
-                        onChange={(event) => setToolOpacity(event.target.value)}
-                        onBlur={() => handleOpacityChange(toolOpacity)}
-                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
-                      />
+                      value={toolOpacity}
+                      onChange={(event) => setToolOpacity(event.target.value)}
+                      onBlur={() => handleOpacityChange(toolOpacity)}
+                      onKeyDown={commitOnEnter()}
+                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                    />
                     </label>
                     <label>
                       Corner radius
                       <input
-                        value={toolRadius}
-                        onChange={(event) => setToolRadius(event.target.value)}
-                        onBlur={() => handleRadiusChange(toolRadius)}
-                        disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
-                      />
+                      value={toolRadius}
+                      onChange={(event) => setToolRadius(event.target.value)}
+                      onBlur={() => handleRadiusChange(toolRadius)}
+                      onKeyDown={commitOnEnter()}
+                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                    />
                     </label>
                   </div>
                   <div className="preset-grid">
@@ -1568,18 +1695,16 @@ export default function App() {
                     <h3>Fill</h3>
                   </div>
                   <div className="color-picker">
-                    <button
-                      className="selected-color-button"
-                      onClick={() =>
+                    <ColorField
+                      value={selectedBackgroundColor}
+                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
+                      onChange={handleFillColorInput}
+                      onTogglePalette={() =>
                         setOpenColorPalette((current) =>
                           current === "background-color" ? null : "background-color",
                         )
                       }
-                      disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
-                    >
-                      <span className="selected-color-swatch" style={{ background: selectedBackgroundColor }} />
-                      <span>{selectedBackgroundColor}</span>
-                    </button>
+                    />
                     {openColorPalette === "background-color" && (
                       <div className="color-map">
                         {COLOR_PRESETS.map((value) => (
@@ -1603,14 +1728,12 @@ export default function App() {
                     <h3>Stroke</h3>
                   </div>
                   <div className="color-picker">
-                    <button
-                      className="selected-color-button"
-                      onClick={() => setOpenColorPalette((current) => (current === "stroke" ? null : "stroke"))}
+                    <ColorField
+                      value={strokeColor}
                       disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
-                    >
-                      <span className="selected-color-swatch" style={{ background: strokeColor }} />
-                      <span>{strokeColor}</span>
-                    </button>
+                      onChange={handleStrokeColorInput}
+                      onTogglePalette={() => setOpenColorPalette((current) => (current === "stroke" ? null : "stroke"))}
+                    />
                     {openColorPalette === "stroke" && (
                       <div className="color-map">
                         {COLOR_PRESETS.map((value) => (
@@ -1633,6 +1756,7 @@ export default function App() {
                       value={strokeWeight}
                       onChange={(event) => setStrokeWeight(event.target.value)}
                       onBlur={() => handleStrokeChange(strokeColor, strokeWeight)}
+                      onKeyDown={commitOnEnter()}
                       disabled={snapshotEditingDisabled || !selectedNodeCanEdit}
                     />
                   </label>
@@ -1695,7 +1819,11 @@ export default function App() {
                   </label>
                   <label>
                     Value
-                    <input value={styleValue} onChange={(event) => setStyleValue(event.target.value)} />
+                    <input
+                      value={styleValue}
+                      onChange={(event) => setStyleValue(event.target.value)}
+                      onKeyDown={commitOnEnter(() => handleApplyStyle())}
+                    />
                   </label>
                   <button onClick={handleApplyStyle} disabled={snapshotEditingDisabled || !selectedNodeCanEdit}>
                     Apply Style
@@ -1789,6 +1917,41 @@ function TopProgress({ loading }: { loading: LoadingState }) {
         <div className="progress-fill" style={{ width: `${loading.progress}%` }} />
         <div className="progress-shine" />
       </div>
+    </div>
+  );
+}
+
+function ColorField({
+  value,
+  disabled,
+  onChange,
+  onTogglePalette,
+}: {
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+  onTogglePalette: () => void;
+}) {
+  const inputValue = value.startsWith("#") && /^#[0-9a-fA-F]{6}$/.test(value) ? value : "#ffffff";
+  return (
+    <div className="color-field">
+      <input
+        type="color"
+        value={inputValue}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+        aria-label="Pick color"
+      />
+      <button
+        type="button"
+        className="color-value-button"
+        onClick={onTogglePalette}
+        disabled={disabled}
+        title="Show color presets"
+        aria-label="Show color presets"
+      >
+        <span>{value}</span>
+      </button>
     </div>
   );
 }
@@ -1904,28 +2067,6 @@ function CursorIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M5.6 2.8c-.7-.5-1.7 0-1.7.9l.7 17c0 1.1 1.4 1.6 2.1.8l4.1-5.1c.5-.6 1.2-.9 2-.9h6c1.1 0 1.6-1.4.8-2.1L5.6 2.8Z" />
-    </svg>
-  );
-}
-
-function ToolsIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 7h10" />
-      <path d="M18 7h2" />
-      <circle cx="16" cy="7" r="2" />
-      <path d="M4 17h2" />
-      <path d="M10 17h10" />
-      <circle cx="8" cy="17" r="2" />
-    </svg>
-  );
-}
-
-function SnapshotsIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M7 5h12v12" />
-      <path d="M5 7h12v12H5z" />
     </svg>
   );
 }
@@ -2310,6 +2451,49 @@ function formatSnapshotDate(value: string) {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+function stripPx(value: string) {
+  return value.trim().replace(/px$/, "");
+}
+
+function normalizeFontWeight(value: string) {
+  const named: Record<string, string> = {
+    normal: "400",
+    bold: "700",
+    lighter: "300",
+    bolder: "700",
+  };
+  return named[value] ?? value;
+}
+
+function normalizeCssColor(value: string | undefined) {
+  if (!value) {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "transparent" || trimmed === "rgba(0, 0, 0, 0)") {
+    return trimmed === "transparent" ? "transparent" : null;
+  }
+  if (trimmed.startsWith("#")) {
+    return trimmed;
+  }
+  const match = trimmed.match(/^rgba?\(([^)]+)\)$/);
+  if (!match) {
+    return trimmed;
+  }
+  const parts = match[1].split(",").map((part) => part.trim());
+  const alpha = parts[3] === undefined ? 1 : Number.parseFloat(parts[3]);
+  if (Number.isFinite(alpha) && alpha <= 0) {
+    return "transparent";
+  }
+  const [red, green, blue] = parts.slice(0, 3).map((part) => Number.parseFloat(part));
+  if (![red, green, blue].every(Number.isFinite)) {
+    return trimmed;
+  }
+  return `#${[red, green, blue]
+    .map((channel) => Math.max(0, Math.min(255, Math.round(channel))).toString(16).padStart(2, "0"))
+    .join("")}`;
 }
 
 function parseCssNumber(value: string) {

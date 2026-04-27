@@ -253,6 +253,7 @@ if (typeof window !== "undefined" && !Reflect.get(window, "__DEV_DESIGN_SELECTIO
     getDevDesignOverlay();
     updateDevDesignOverlay();
     const rect = selected?.getBoundingClientRect?.();
+    const style = selected ? window.getComputedStyle(selected) : null;
     window.parent.postMessage({
       type: "dev-design-select",
       id: selectedId,
@@ -261,6 +262,17 @@ if (typeof window !== "undefined" && !Reflect.get(window, "__DEV_DESIGN_SELECTIO
         height: rect.height,
         left: rect.left,
         top: rect.top
+      } : null,
+      style: style ? {
+        color: style.color,
+        backgroundColor: style.backgroundColor,
+        fontSize: style.fontSize,
+        fontWeight: style.fontWeight,
+        opacity: style.opacity,
+        borderColor: style.borderColor,
+        borderWidth: style.borderWidth,
+        borderRadius: style.borderRadius,
+        boxShadow: style.boxShadow
       } : null
     }, "*");
   });
@@ -362,6 +374,19 @@ function makeSelectionClickAttribute(id: string): t.JSXAttribute {
                   ),
                 ),
               ]),
+              t.variableDeclaration("const", [
+                t.variableDeclarator(
+                  t.identifier("style"),
+                  t.conditionalExpression(
+                    t.identifier("selected"),
+                    t.callExpression(
+                      t.memberExpression(t.identifier("window"), t.identifier("getComputedStyle")),
+                      [t.identifier("selected")],
+                    ),
+                    t.nullLiteral(),
+                  ),
+                ),
+              ]),
               t.expressionStatement(
                 t.callExpression(t.memberExpression(t.memberExpression(t.identifier("window"), t.identifier("parent")), t.identifier("postMessage")), [
                   t.objectExpression([
@@ -376,6 +401,24 @@ function makeSelectionClickAttribute(id: string): t.JSXAttribute {
                           t.objectProperty(t.identifier("height"), t.memberExpression(t.identifier("rect"), t.identifier("height"))),
                           t.objectProperty(t.identifier("left"), t.memberExpression(t.identifier("rect"), t.identifier("left"))),
                           t.objectProperty(t.identifier("top"), t.memberExpression(t.identifier("rect"), t.identifier("top"))),
+                        ]),
+                        t.nullLiteral(),
+                      ),
+                    ),
+                    t.objectProperty(
+                      t.identifier("style"),
+                      t.conditionalExpression(
+                        t.identifier("style"),
+                        t.objectExpression([
+                          t.objectProperty(t.identifier("color"), t.memberExpression(t.identifier("style"), t.identifier("color"))),
+                          t.objectProperty(t.identifier("backgroundColor"), t.memberExpression(t.identifier("style"), t.identifier("backgroundColor"))),
+                          t.objectProperty(t.identifier("fontSize"), t.memberExpression(t.identifier("style"), t.identifier("fontSize"))),
+                          t.objectProperty(t.identifier("fontWeight"), t.memberExpression(t.identifier("style"), t.identifier("fontWeight"))),
+                          t.objectProperty(t.identifier("opacity"), t.memberExpression(t.identifier("style"), t.identifier("opacity"))),
+                          t.objectProperty(t.identifier("borderColor"), t.memberExpression(t.identifier("style"), t.identifier("borderColor"))),
+                          t.objectProperty(t.identifier("borderWidth"), t.memberExpression(t.identifier("style"), t.identifier("borderWidth"))),
+                          t.objectProperty(t.identifier("borderRadius"), t.memberExpression(t.identifier("style"), t.identifier("borderRadius"))),
+                          t.objectProperty(t.identifier("boxShadow"), t.memberExpression(t.identifier("style"), t.identifier("boxShadow"))),
                         ]),
                         t.nullLiteral(),
                       ),
